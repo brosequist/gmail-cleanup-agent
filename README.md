@@ -83,7 +83,7 @@ ollama pull qwen3.6:35b-a3b       # 15 GB, needs 16+ GB VRAM, much better qualit
 ollama serve &   # or run `ollama` as a system service
 
 # 3. Install this tool
-git clone https://github.com/brett-rosequist/gmail-cleanup-agent
+git clone https://github.com/brosequist/gmail-cleanup-agent
 cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -103,7 +103,7 @@ export OLLAMA_MODEL=qwen3:8b     # or whatever you pulled
 #    Default URL: http://localhost:1234
 
 # 2. Install this tool (same as above)
-git clone https://github.com/brett-rosequist/gmail-cleanup-agent
+git clone https://github.com/brosequist/gmail-cleanup-agent
 cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt openai     # +openai SDK for the
