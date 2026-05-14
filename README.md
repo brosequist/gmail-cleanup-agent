@@ -172,6 +172,42 @@ python -m gmail_cleanup classify \
 The bundled `scripts/run-cleanup.sh` wraps this with sensible
 defaults and a tee'd log.
 
+## Reorganizing later: the `relabel` pass
+
+After a big classification run you'll often want to *add* label
+categories — you notice 1,000 emails landed in `Receipts` that are
+really travel itineraries, so you add a `Travel` label. The `relabel`
+subcommand reorganizes **already-kept** mail against your updated
+`config/labels.yaml` without redoing any keep-vs-trash decisions:
+
+```bash
+# Add the new categories to config/labels.yaml first, then:
+
+# Dry-run — proposes label changes, writes relabel.log, touches nothing
+python -m gmail_cleanup relabel --input-log dry-run.log --dry-run
+
+# Review relabel.log — each line shows old_label → new_label + changed flag
+
+# Apply — moves the Gmail label for every email whose label changed
+python -m gmail_cleanup relabel --input-log applied.log --apply
+```
+
+Key properties:
+
+- **It cannot trash anything.** `relabel` only ever assigns a label.
+  The LLM is never asked to decide keep-vs-trash; emails that were
+  kept stay kept.
+- **It reads from a decision log** (`dry-run.log` or `applied.log`),
+  taking only the `keep` rows. Trash and error rows are ignored.
+- **On `--apply`** it does a single `threads.modify` per changed
+  email: add the new label, remove the old one. Emails whose label
+  didn't change get no API call.
+- **Resumable** via its own `relabel-state.json` (separate from the
+  classify checkpoint), so Ctrl+C and re-run is safe.
+- **`--refetch-snippets`** re-pulls each email's snippet from Gmail
+  for richer context — slower (one API call per email) but produces
+  noticeably better labels than sender + subject alone.
+
 ## Configuration
 
 ### `config/labels.yaml`

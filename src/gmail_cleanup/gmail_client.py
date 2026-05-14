@@ -255,6 +255,35 @@ class GmailClient:
             if not page_token:
                 break
 
+    def fetch_thread_meta(self, thread_id: str) -> ThreadSummary | None:
+        """Fetch From/Subject/Date + snippet for a single thread by ID.
+        Returns None if the thread no longer exists (404 — deleted or
+        spammed since it was first seen). Used by the relabel pass to
+        re-hydrate snippets that the decision log doesn't store."""
+        def _get(tid=thread_id):
+            return self.service.users().threads().get(
+                userId="me", id=tid, format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+        try:
+            th = _retry_gmail(_get, on_rebuild=self._rebuild_service)
+        except HttpError as e:
+            if getattr(e.resp, "status", 0) == 404:
+                return None
+            raise
+        msgs = th.get("messages", [])
+        if not msgs:
+            return None
+        first = msgs[0]
+        hdrs = {h["name"]: h["value"] for h in first.get("payload", {}).get("headers", [])}
+        return ThreadSummary(
+            thread_id=thread_id,
+            sender=hdrs.get("From", ""),
+            subject=hdrs.get("Subject", "(no subject)"),
+            snippet=first.get("snippet", ""),
+            date=hdrs.get("Date", ""),
+        )
+
     def trash_thread(self, thread_id: str) -> None:
         def _do():
             return self.service.users().threads().trash(
@@ -264,6 +293,25 @@ class GmailClient:
 
     def add_label_to_thread(self, thread_id: str, label_id: str) -> None:
         body = {"addLabelIds": [label_id], "removeLabelIds": []}
+        def _do():
+            return self.service.users().threads().modify(
+                userId="me", id=thread_id, body=body
+            ).execute()
+        _retry_gmail(_do, on_rebuild=self._rebuild_service)
+
+    def modify_thread_labels(
+        self, thread_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> None:
+        """Add and/or remove labels on a thread in a single modify call.
+        Gmail's modify is idempotent — removing a label the thread does
+        not have is a harmless no-op, so callers don't need to check
+        membership first."""
+        body = {
+            "addLabelIds": add_label_ids or [],
+            "removeLabelIds": remove_label_ids or [],
+        }
         def _do():
             return self.service.users().threads().modify(
                 userId="me", id=thread_id, body=body

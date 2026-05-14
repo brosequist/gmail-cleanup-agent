@@ -215,3 +215,126 @@ def validate_decisions_strict(
         out.append({"id": eid, "action": action, "label": label})
     missing_ids = set(by_id.keys()) - seen_ids
     return out, missing_ids, errors
+
+
+# ---------------- relabel-only pass ----------------
+#
+# Used by the `relabel` subcommand. Unlike classify, this NEVER decides
+# keep-vs-trash — the emails are all already-kept. The model's only job
+# is to pick the best-fitting label from the (possibly expanded)
+# catalog. This keeps the reorganization safe: nothing can be sent to
+# trash by a relabel pass.
+
+
+def build_relabel_prompt(catalog: LabelCatalog, batch: list[dict]) -> str:
+    """Render a label-only prompt. Each batch item is a dict with keys
+    `id`, `sender`, `subject`, and optionally `snippet` and
+    `current_label`. The model returns one label per email."""
+    label_lines = []
+    for name in catalog.existing:
+        label_lines.append(f"- `{name}` (existing)")
+    for name, desc in catalog.auto_create.items():
+        label_lines.append(f"- `{name}` — {desc}")
+
+    emails_block = []
+    for i, e in enumerate(batch, 1):
+        lines = [f"## {i}. id: {e['id']}", f"From: {e['sender']}", f"Subject: {e['subject']}"]
+        if e.get("snippet"):
+            lines.append(f"Snippet: {e['snippet'][:300]}")
+        if e.get("current_label"):
+            lines.append(f"Current label: {e['current_label']}")
+        emails_block.append("\n".join(lines) + "\n")
+
+    return f"""You are an email-organizing assistant. Every email below has
+already been reviewed and is being KEPT — you are NOT deciding whether to
+keep or trash anything. Your only task is to assign each email the single
+best-fitting label from the catalog.
+
+# Available labels
+
+Choose exactly one label per email — the closest fit. If the email's
+`Current label` is still the best fit, return that same label. Only
+choose a different label when another one clearly fits better (for
+example, a newly added category that is a tighter match).
+
+{chr(10).join(label_lines)}
+
+# Output format
+
+Return ONLY a JSON object with this exact structure (no prose, no markdown):
+
+```json
+{{"decisions": [
+  {{"id": "...", "label": "Receipts"}},
+  {{"id": "...", "label": "Travel"}}
+]}}
+```
+
+The `decisions` array must have exactly the same number of entries as
+input emails, in the same order. Each `id` must match an input id. Each
+`label` must be exactly one of the labels listed above.
+
+# Emails to label
+
+{chr(10).join(emails_block)}
+"""
+
+
+_RELABEL_RE = re.compile(
+    r'\{\s*"id"\s*:\s*"(?P<id>[^"]+)"\s*,'
+    r'\s*"label"\s*:\s*"(?P<label>[^"]*)"\s*\}',
+    re.DOTALL,
+)
+
+
+def parse_relabel_decisions(raw: str) -> list[dict]:
+    """Parse a relabel response. Strict JSON first, regex fallback."""
+    import json
+
+    s = raw.strip()
+    for fence in ("```json", "```"):
+        if s.startswith(fence):
+            s = s[len(fence):].lstrip()
+        if s.endswith("```"):
+            s = s[:-3].rstrip()
+    try:
+        d = json.loads(s)
+        if isinstance(d, dict) and isinstance(d.get("decisions"), list):
+            return d["decisions"]
+    except json.JSONDecodeError:
+        pass
+
+    out = []
+    for m in _RELABEL_RE.finditer(raw):
+        out.append({"id": m.group("id"), "label": m.group("label")})
+    return out
+
+
+def validate_relabel_decisions(
+    decisions: list[dict], batch: list[dict], catalog: LabelCatalog
+) -> tuple[list[dict], set[str], list[str]]:
+    """Strict relabel validator. Returns (good, missing_ids, errors).
+    `good` entries are {id, label} with label guaranteed to be in the
+    catalog. Caller re-prompts missing ids, then falls back to keeping
+    each missing email's existing label (never drops a label)."""
+    valid_labels = set(catalog.all_keep_labels)
+    by_id = {e["id"]: e for e in batch}
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+    errors: list[str] = []
+    for d in decisions:
+        eid = d.get("id")
+        if eid not in by_id:
+            errors.append(f"unknown id: {eid!r}")
+            continue
+        if eid in seen_ids:
+            errors.append(f"duplicate id: {eid!r}")
+            continue
+        label = d.get("label")
+        if label not in valid_labels:
+            errors.append(f"id={eid}: unknown label {label!r}")
+            continue
+        seen_ids.add(eid)
+        out.append({"id": eid, "label": label})
+    missing_ids = set(by_id.keys()) - seen_ids
+    return out, missing_ids, errors

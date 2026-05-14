@@ -3,7 +3,8 @@
 Subcommands:
   auth       — run the Google OAuth flow once
   classify   — paginate threads, classify in batches, log decisions, optionally apply
-  resume     — pick up from state.json checkpoint
+  relabel    — re-label already-kept emails against the current catalog;
+               never decides keep-vs-trash, so it cannot trash anything
 """
 
 from __future__ import annotations
@@ -23,10 +24,13 @@ from .gmail_client import GmailClient, ThreadSummary
 from .prompt import (
     LabelCatalog,
     build_prompt,
+    build_relabel_prompt,
     is_whitelisted,
     load_whitelist,
     parse_decisions,
+    parse_relabel_decisions,
     validate_decisions_strict,
+    validate_relabel_decisions,
 )
 from .backends import get_backend
 
@@ -273,6 +277,316 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
         logger.info("counters: %s", counters)
         logger.info("log: %s", log_file)
         logger.info("state: %s", state_file)
+
+
+@cli.command()
+@click.option(
+    "--input-log",
+    type=click.Path(path_type=Path, exists=True),
+    default=REPO_ROOT / "dry-run.log",
+    show_default=True,
+    help="Decision log to read already-kept emails from (dry-run.log or applied.log).",
+)
+@click.option(
+    "--batch-size", type=int, default=20, show_default=True,
+    help="Emails per LLM call.",
+)
+@click.option(
+    "--llm-retries", type=int, default=2, show_default=True,
+    help="Max retries on missing/invalid labels within a batch. After this, the email keeps its existing label.",
+)
+@click.option(
+    "--apply/--dry-run", default=False,
+    help="--apply actually moves labels in Gmail. --dry-run (default) only logs proposed changes.",
+)
+@click.option(
+    "--confirm-every", type=int, default=500, show_default=True,
+    help="In --apply mode, prompt for y/n every N label changes.",
+)
+@click.option(
+    "--concurrency", type=int, default=4, show_default=True,
+    help="Number of batches to relabel in parallel.",
+)
+@click.option(
+    "--refetch-snippets", is_flag=True,
+    help="Fetch each email's snippet from Gmail for richer context (1 API call per email — slower, but better labels).",
+)
+@click.option(
+    "--state-file", type=click.Path(path_type=Path),
+    default=REPO_ROOT / "relabel-state.json", show_default=True,
+)
+@click.option(
+    "--log-file", type=click.Path(path_type=Path), default=None,
+    help="Override default log file (relabel.log).",
+)
+def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
+            concurrency, refetch_snippets, state_file, log_file):
+    """Re-label already-kept emails against the current label catalog.
+
+    Reads `keep` decisions from a prior decision log, re-asks the LLM to
+    pick the best label for each from the *current* config/labels.yaml,
+    and (with --apply) moves the Gmail label. It NEVER decides
+    keep-vs-trash and never calls trash — emails that were kept stay
+    kept. Use this after expanding your label catalog to reorganize
+    without redoing the trash decisions.
+    """
+    if log_file is None:
+        log_file = REPO_ROOT / "relabel.log"
+
+    catalog = LabelCatalog.load(CONFIG_DIR / "labels.yaml")
+    backend = get_backend()
+    logger.info("backend: %s", backend)
+    logger.info("catalog: %d keep-labels available", len(catalog.all_keep_labels))
+    logger.info("input log: %s", input_log)
+    logger.info("mode: %s", "APPLY (will move Gmail labels)" if apply else "dry-run")
+
+    # Read already-kept emails from the input log. Keep the LAST decision
+    # per id (in case the log has re-run duplicates). Skip trash / error
+    # rows entirely — relabel only touches kept mail.
+    kept: dict[str, dict] = {}
+    with open(input_log) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("==="):
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("action") != "keep":
+                continue
+            kept[rec["id"]] = rec
+    logger.info("found %d already-kept emails in %s", len(kept), input_log)
+    if not kept:
+        logger.info("nothing to relabel")
+        return
+
+    client = _client()
+    client.authorize()
+    label_ids: dict[str, str] = client.list_labels()
+    if apply:
+        for name in catalog.auto_create:
+            if name not in label_ids:
+                logger.info("creating label %r", name)
+                label_ids[name] = client.create_label(name)
+    else:
+        missing = [n for n in catalog.auto_create if n not in label_ids]
+        if missing:
+            logger.info("--dry-run: would create labels: %s", ", ".join(missing))
+
+    # Resume — relabel uses its own state file so it never collides with
+    # the classify checkpoint.
+    processed: set[str] = set()
+    if state_file.exists():
+        try:
+            processed = set(json.loads(state_file.read_text()).get("processed", []))
+            logger.info("resuming: %d emails already relabeled", len(processed))
+        except Exception:
+            logger.warning("could not read %s; starting fresh", state_file)
+
+    work = [rec for rid, rec in kept.items() if rid not in processed]
+    logger.info("%d emails to relabel (%d skipped from resume state)",
+                len(work), len(kept) - len(work))
+
+    log_fh = log_file.open("a")
+    log_fh.write(f"\n=== {datetime.now(timezone.utc).isoformat()} relabel starting (apply={apply}) ===\n")
+    log_fh.flush()
+
+    counters = {"changed": 0, "unchanged": 0, "errors": 0, "skipped_resume": len(kept) - len(work)}
+    counters_lock = threading.Lock()
+    log_lock = threading.Lock()
+    actions_since_confirm = 0
+
+    def maybe_confirm():
+        nonlocal actions_since_confirm
+        if not apply or confirm_every <= 0 or actions_since_confirm < confirm_every:
+            return
+        click.echo(f"\n>>> {actions_since_confirm} label changes applied. Counters: {counters}.")
+        if not click.confirm("continue?", default=True):
+            click.echo("aborting at user request")
+            sys.exit(0)
+        actions_since_confirm = 0
+
+    def report_progress():
+        done = counters["changed"] + counters["unchanged"] + counters["errors"]
+        if done:
+            logger.info("progress | relabeled: %d | changed: %d | unchanged: %d | errors: %d",
+                        done, counters["changed"], counters["unchanged"], counters["errors"])
+
+    try:
+        buffer: list[list[dict]] = []
+        cur: list[dict] = []
+
+        def flush():
+            nonlocal actions_since_confirm
+            if not buffer:
+                return
+            results: dict[int, list[dict]] = {}
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = {
+                    ex.submit(_relabel_pure, b, catalog, backend, llm_retries,
+                              client if refetch_snippets else None): i
+                    for i, b in enumerate(buffer)
+                }
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    try:
+                        results[idx] = fut.result()
+                    except Exception as e:
+                        logger.error("relabel worker died: %s", e)
+                        results[idx] = [
+                            {"id": r["id"], "label": r.get("label"), "_err": str(e)}
+                            for r in buffer[idx]
+                        ]
+            for i, b in enumerate(buffer):
+                by_id = {r["id"]: r for r in b}
+                for d in results[i]:
+                    rec = by_id.get(d["id"])
+                    if rec is None:
+                        continue
+                    old_label = rec.get("label")
+                    new_label = d.get("label")
+                    err = d.get("_err")
+                    if err:
+                        with counters_lock:
+                            counters["errors"] += 1
+                        with log_lock:
+                            _log_relabel(log_fh, rec, old_label, old_label, False,
+                                         f"error: {err[:200]}")
+                        continue
+                    changed = new_label != old_label
+                    if changed and apply:
+                        add_ids = [label_ids[new_label]] if new_label in label_ids else []
+                        remove_ids = [label_ids[old_label]] if old_label in label_ids else []
+                        if add_ids:
+                            try:
+                                client.modify_thread_labels(
+                                    rec["id"], add_label_ids=add_ids,
+                                    remove_label_ids=remove_ids)
+                            except Exception as e:
+                                logger.error("relabel apply failed for %s: %s", rec["id"], e)
+                                with counters_lock:
+                                    counters["errors"] += 1
+                                with log_lock:
+                                    _log_relabel(log_fh, rec, old_label, new_label, False,
+                                                 f"apply failed: {e}")
+                                continue
+                        else:
+                            logger.warning("new label %r has no Gmail id; logging only", new_label)
+                    with counters_lock:
+                        counters["changed" if changed else "unchanged"] += 1
+                    with log_lock:
+                        _log_relabel(log_fh, rec, old_label, new_label, changed,
+                                     "applied" if (changed and apply) else "")
+                    processed.add(rec["id"])
+                    if changed and apply:
+                        actions_since_confirm += 1
+            _checkpoint(state_file, processed)
+            report_progress()
+            buffer.clear()
+            maybe_confirm()
+
+        for rec in work:
+            cur.append(rec)
+            if len(cur) >= batch_size:
+                buffer.append(cur)
+                cur = []
+                if len(buffer) >= concurrency:
+                    flush()
+        if cur:
+            buffer.append(cur)
+        flush()
+    finally:
+        log_fh.write(f"=== done. counters: {json.dumps(counters)} ===\n")
+        log_fh.flush()
+        log_fh.close()
+        logger.info("counters: %s", counters)
+        logger.info("log: %s", log_file)
+        logger.info("state: %s", state_file)
+
+
+def _relabel_pure(
+    batch: list[dict], catalog: LabelCatalog, backend, llm_retries: int,
+    client=None,
+) -> list[dict]:
+    """Pure relabel worker, safe to call from a thread. `batch` items are
+    decision-log records ({id, from, subject, label}). If `client` is
+    given, snippets are re-fetched from Gmail for richer context.
+    Returns a list of {id, label} — label is the model's choice, or the
+    email's existing label if the model never produced a valid one.
+    Never decides keep-vs-trash."""
+    llm_batch: list[dict] = []
+    for rec in batch:
+        item = {
+            "id": rec["id"],
+            "sender": rec.get("from", ""),
+            "subject": rec.get("subject", ""),
+            "current_label": rec.get("label"),
+        }
+        if client is not None:
+            try:
+                meta = client.fetch_thread_meta(rec["id"])
+                if meta is not None:
+                    item["snippet"] = meta.snippet
+                    # prefer freshly-fetched sender/subject if the log truncated them
+                    item["sender"] = meta.sender or item["sender"]
+                    item["subject"] = meta.subject or item["subject"]
+            except Exception as e:
+                logger.warning("snippet refetch failed for %s: %s", rec["id"], e)
+        llm_batch.append(item)
+
+    decisions: list[dict] = []
+    remaining = list(llm_batch)
+    for attempt in range(llm_retries + 1):
+        if not remaining:
+            break
+        prompt = build_relabel_prompt(catalog, remaining)
+        try:
+            t0 = time.monotonic()
+            raw = backend.classify_batch(prompt)
+            dur = time.monotonic() - t0
+            tag = "" if attempt == 0 else f" (retry {attempt})"
+            logger.info("relabeled %d emails in %.1fs%s", len(remaining), dur, tag)
+        except Exception as e:
+            logger.error("backend error: %s", e)
+            if attempt == 0:
+                # First call failed entirely — surface every email as an error
+                return [{"id": x["id"], "label": x.get("current_label"), "_err": str(e)}
+                        for x in llm_batch]
+            break
+
+        parsed = parse_relabel_decisions(raw)
+        good, missing_ids, errs = validate_relabel_decisions(parsed, remaining, catalog)
+        for ev in errs:
+            logger.warning("relabel validate: %s", ev)
+        decisions.extend(good)
+        if missing_ids and attempt < llm_retries:
+            logger.warning("attempt %d: %d emails missing labels, retrying just those",
+                           attempt + 1, len(missing_ids))
+        remaining = [x for x in remaining if x["id"] in missing_ids]
+
+    # Anything still unlabeled by the model keeps its existing label —
+    # never drop a label just because the model fumbled the JSON.
+    for x in remaining:
+        logger.warning("id=%s: no valid label after %d retries; keeping existing label %r",
+                       x["id"], llm_retries, x.get("current_label"))
+        decisions.append({"id": x["id"], "label": x.get("current_label")})
+
+    return decisions
+
+
+def _log_relabel(fh, rec: dict, old_label, new_label, changed: bool, note: str):
+    out = {
+        "id": rec["id"],
+        "from": rec.get("from", ""),
+        "subject": (rec.get("subject", "") or "")[:120],
+        "old_label": old_label,
+        "new_label": new_label,
+        "changed": changed,
+        "note": note,
+    }
+    fh.write(json.dumps(out, ensure_ascii=False) + "\n")
+    fh.flush()
 
 
 def _classify_pure(
