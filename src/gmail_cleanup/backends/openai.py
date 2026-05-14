@@ -20,11 +20,18 @@ Selected via GCA_BACKEND=openai. Configure via env:
   OPENAI_JSON_MODE    default "1" — sends `response_format: json_object`.
                       Set to "0" if your local server doesn't support it
                       (older llama.cpp builds, some vLLM configs).
+  OPENAI_RETRIES      default 5 — retry transient connection / rate-limit
+                      errors with exponential backoff (1, 2, 4, 8, 16 s).
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import time
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIBackend:
@@ -37,12 +44,30 @@ class OpenAIBackend:
             ) from e
         api_key = os.environ.get("OPENAI_API_KEY") or "not-needed"
         base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        # max_retries=0 — let our explicit retry loop below own the
+        # retry semantics so the logged attempt count is meaningful and
+        # the user-tunable OPENAI_RETRIES is actually authoritative.
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
         self.model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self.max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "4000"))
         self.temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.1"))
         self.json_mode = os.environ.get("OPENAI_JSON_MODE", "1") not in ("0", "false", "no")
+        self.retries = int(os.environ.get("OPENAI_RETRIES", "5"))
         self.base_url = base_url
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """Connection-level or rate-limit errors that are worth retrying.
+        Semantic errors (bad request, unsupported model, auth) are NOT
+        retried — they'll just keep failing and we want to fail loud."""
+        # Import lazily so the module can be imported without the openai
+        # SDK installed (the constructor would have failed first anyway).
+        from openai import APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
+        return isinstance(exc, (
+            APIConnectionError,
+            APITimeoutError,
+            RateLimitError,
+            InternalServerError,
+        ))
 
     def classify_batch(self, prompt: str) -> str:
         kwargs = dict(
@@ -53,8 +78,26 @@ class OpenAIBackend:
         )
         if self.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        resp = self.client.chat.completions.create(**kwargs)
-        return resp.choices[0].message.content or ""
+
+        last_exc: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                resp = self.client.chat.completions.create(**kwargs)
+                return resp.choices[0].message.content or ""
+            except Exception as e:
+                if not self._is_retryable(e) or attempt >= self.retries:
+                    raise
+                last_exc = e
+                delay = min(2 ** attempt, 30)
+                logger.warning(
+                    "openai transient error (%s: %s) — retrying in %ds (attempt %d/%d)",
+                    type(e).__name__, e, delay, attempt + 1, self.retries
+                )
+                time.sleep(delay)
+        # Unreachable in practice — loop either returns or raises
+        raise RuntimeError(
+            f"openai call failed after {self.retries + 1} attempts"
+        ) from last_exc
 
     def __repr__(self):
         return f"OpenAIBackend(model={self.model}, base_url={self.base_url})"

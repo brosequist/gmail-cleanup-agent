@@ -12,7 +12,12 @@ For each email, only:
 - **Sender** (From: header)
 - **Subject** line
 - **Snippet** — the ~200-char preview Gmail returns by default
-- **Date** the email was received
+  (capped at 300 chars by the prompt builder as a defensive measure)
+
+The **Date** the email was received is fetched alongside the metadata
+and recorded in the local decision log, but it is NOT sent to the
+LLM. Keeping the prompt date-free saves tokens and makes the
+classifier age-agnostic.
 
 The **full message body is NOT sent** unless you explicitly pass
 `--include-body`, which we do not recommend for the bulk-classification

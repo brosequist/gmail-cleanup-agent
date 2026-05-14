@@ -20,9 +20,9 @@ brutal:
 | Path | Time | Money | Privacy |
 |---|---|---|---|
 | **Manual** (3 sec / email, average) | ~190 hrs ≈ 5 weeks full-time | $0 | full |
-| **This script, local LLM** on a consumer GPU | ~43 hrs of GPU time over ~5 calendar days, mostly unattended | ~$4 of electricity | full — nothing leaves the machine |
-| **This script, Claude Haiku 4.5** | ~30–60 min | ~$55 | sender/subject/snippet leave the machine |
-| **This script, GPT-4o-mini** | ~30–60 min | ~$8 | same |
+| **This script, local LLM** on a consumer GPU | ~43 hrs of active LLM compute (sum of successful batch durations across 4 workers; idle / downtime / failed-call retries excluded) | ~$4 of electricity | full — nothing leaves the machine |
+| **This script, Claude Haiku 4.5** | ~30–60 min | ~$51 | sender/subject/snippet leave the machine |
+| **This script, GPT-4o-mini** | ~30–60 min | ~$7 | same |
 | **This script, Gemini 2.0 Flash** | ~30–60 min | ~$5 | same |
 
 (Token + cost math for the API rows is in [docs/cost-math.md](docs/cost-math.md).
@@ -60,10 +60,14 @@ For each email:
 
 - Sender (`From:` header)
 - Subject
-- Snippet (~200 chars Gmail provides as a preview)
+- Snippet (the ~200-char preview Gmail provides; capped at 300 chars
+  defensively by the prompt builder)
 - **Never the full body** unless you explicitly pass `--include-body`
   (off by default — and even then, snippet is preferred when
   available).
+- **Never the Date.** It's fetched alongside the metadata and stored
+  locally in the decision log, but it's not included in the LLM
+  prompt (kept the prompt smaller and the classifier age-agnostic).
 
 See [docs/privacy.md](docs/privacy.md) for the full breakdown.
 

@@ -12,9 +12,14 @@ This doc shows the inputs so you can plug in your own.
 - **Model:** `qwen3.6:35b-a3b-iq3_xxs-fixed` via Ollama
   (35B-A3B MoE, ~3B active params per token, IQ3 quant ≈ 15 GB).
 - **Concurrency:** 4 parallel batches of 20 threads each.
-- **Wall-clock LLM time (sum of all batch durations / concurrency):**
-  ~43 hours, spread across ~5 calendar days of intermittent runtime
-  (the script was restarted several times during cluster maintenance).
+- **Active LLM compute time:** ~43 hours. This is the **sum of
+  successful `classified N emails in X.Xs` batch durations from the
+  console log, divided by concurrency 4**. It does NOT include time
+  the script was stopped, time spent waiting on a downed Ollama, or
+  time spent on batches that failed without producing a decision.
+  The script runs were spread across ~5 calendar days of mostly
+  unattended operation with several maintenance interruptions, but
+  that calendar span is not what counts against "cost to run."
 - **Outcome at time of snapshot:** keep 36,413 (15.8%), trash
   170,627 (73.9%), error 23,720 (10.3% — mostly accumulated during a
   period of Ollama instability; effective error rate during stable
@@ -22,21 +27,27 @@ This doc shows the inputs so you can plug in your own.
 
 ## Per-batch token sizing
 
-Measured by running the actual `build_prompt()` against a 20-email
-batch with realistic sender / subject / snippet lengths and counting
-the characters in the result (1 token ≈ 4 chars for English):
+Measured by running the actual `build_prompt()` against the shipped
+`config/rules.example.md` + `config/labels.example.yaml` (so you can
+reproduce these numbers) and a 20-email batch with realistic sender /
+subject / snippet lengths. Character count ÷ 4 ≈ tokens for English:
 
 | Item | ~tokens |
 |---|---|
-| Fixed prefix (rules.md + label catalog + JSON-format instructions) | 1,670 |
+| Fixed prefix (rules + label catalog + JSON-format instructions) | 1,300 |
 | Per email (id + sender + subject + snippet, formatted) | 106 |
-| **Total input per batch of 20** | **~3,790** |
+| **Total input per batch of 20** | **~3,400** |
 | **Output per batch of 20** (`{"decisions":[...]}`) | **~200** |
 
 For 230,760 threads at batch size 20 = 11,538 batches:
 
-- **Total input tokens:** 11,538 × 3,790 ≈ **43.7M**
+- **Total input tokens:** 11,538 × 3,400 ≈ **39.5M**
 - **Total output tokens:** 11,538 × 200 ≈ **2.3M**
+
+If your own `rules.md` is longer or shorter than the example, expect
+the prefix-per-batch (and total cost) to scale roughly linearly. My
+actual run with a longer rules file landed closer to ~$55 on Haiku
+instead of the $51 below.
 
 ## Cloud API cost estimates
 
@@ -45,10 +56,10 @@ pricing before quoting these:
 
 | Backend | $/MTok in | $/MTok out | Input cost | Output cost | **Total** |
 |---|---|---|---|---|---|
-| Claude Haiku 4.5 | $1.00 | $5.00 | $43.70 | $11.50 | **~$55** |
-| GPT-4.1-mini | $0.40 | $1.60 | $17.48 | $3.68 | **~$21** |
-| GPT-4o-mini | $0.15 | $0.60 | $6.55 | $1.38 | **~$8** |
-| Gemini 2.0 Flash | $0.10 | $0.40 | $4.37 | $0.92 | **~$5** |
+| Claude Haiku 4.5 | $1.00 | $5.00 | $39.50 | $11.50 | **~$51** |
+| GPT-4.1-mini | $0.40 | $1.60 | $15.80 | $3.68 | **~$19** |
+| GPT-4o-mini | $0.15 | $0.60 | $5.93 | $1.38 | **~$7** |
+| Gemini 2.0 Flash | $0.10 | $0.40 | $3.95 | $0.92 | **~$5** |
 
 These are full-price; in practice you'd also benefit from prompt
 caching on the fixed prefix (the rules + label catalog are the same
