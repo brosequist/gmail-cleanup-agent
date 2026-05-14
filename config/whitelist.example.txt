@@ -1,0 +1,14 @@
+# Senders that are NEVER classified as trash, regardless of LLM judgment.
+# Match rules:
+#   - lines starting with @ match a domain (e.g. @example.com)
+#   - lines without @ match a substring of the address
+#   - lines with a full address match exactly
+# Comments start with #
+# One per line.
+
+# Examples:
+# @yourcompany.com
+# mom@gmail.com
+# bank.example.com
+# @irs.gov
+# @schoolname.edu

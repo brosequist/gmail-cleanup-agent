@@ -1,0 +1,24 @@
+# Label catalog used by the classifier.
+#
+# `existing` — labels that already exist in your Gmail. The classifier
+#              will use these where applicable but won't create them.
+# `auto_create` — categories you want for important emails. The classifier
+#              will create these labels in your Gmail the first time
+#              they're applied. Each entry has a one-line description
+#              that goes into the LLM prompt to guide classification.
+
+existing:
+  - Taxes
+  - Filed
+  - Notes
+  - Politics
+
+auto_create:
+  Family: "personal correspondence from friends or family members"
+  Receipts: "order confirmations, invoices, payment receipts, account statements"
+  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results, insurance"
+  School: "emails from schools, teachers, educational institutions, and tuition platforms"
+  Sports: "league registrations, team schedules, coach updates, sports event tickets"
+  Organizations: "community groups, professional associations, volunteer organizations you're a member of"
+  Government: "emails from government offices (DMV, tax authorities, immigration, voter, etc.)"
+  Registrations: "event registration confirmations, account creation confirmations, program enrollments"

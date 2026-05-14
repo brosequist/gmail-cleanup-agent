@@ -1,0 +1,10 @@
+google-api-python-client>=2.140.0
+google-auth>=2.34.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+httpx>=0.27.0
+pyyaml>=6.0.2
+click>=8.1.7
+# Optional backends — install only the one(s) you need
+anthropic>=0.40.0  ; extra == "claude"
+openai>=1.55.0     ; extra == "openai"

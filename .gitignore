@@ -1,0 +1,23 @@
+# Secrets and per-user config
+config/credentials.json
+config/token.json
+config/labels.yaml
+config/rules.md
+config/whitelist.txt
+
+# Run artifacts
+*.log
+state.json
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
