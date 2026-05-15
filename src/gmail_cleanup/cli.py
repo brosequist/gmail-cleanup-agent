@@ -132,8 +132,17 @@ def auth():
     show_default=True,
     help="Number of batches to classify in parallel. Set to 1 to disable.",
 )
+@click.option(
+    "--retry-errors/--no-retry-errors",
+    default=False,
+    show_default=True,
+    help="Re-classify threads whose most recent action in the log file is "
+         "\"error\". Reads --log-file, finds IDs to retry, and removes them "
+         "from the resume-skip set before processing. Use after a transient "
+         "backend failure mass-errored a batch.",
+)
 def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
-             state_file, log_file, concurrency):
+             state_file, log_file, concurrency, retry_errors):
     """Classify and (optionally) act on threads matching `query`."""
 
     if log_file is None:
@@ -175,6 +184,39 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
             logger.info("resuming: %d threads already processed", len(processed))
         except Exception:
             logger.warning("could not read state file %s; starting fresh", state_file)
+
+    # --retry-errors: re-classify threads whose most recent decision in the
+    # log file was action=="error". The log is append-mode JSONL across
+    # runs, so an ID may have multiple records — only the LATEST matters
+    # (a successful re-classification after the error should NOT trigger
+    # another retry).
+    if retry_errors and log_file.exists():
+        latest_action: dict[str, str] = {}
+        parsed_records = 0
+        with log_file.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("==="):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                rid = rec.get("id")
+                act = rec.get("action")
+                if rid and act:
+                    latest_action[rid] = act
+                    parsed_records += 1
+        retry_ids = {rid for rid, act in latest_action.items() if act == "error"}
+        before = len(processed)
+        processed -= retry_ids
+        logger.info(
+            "--retry-errors: parsed %d log records, %d threads marked for retry; "
+            "resume set %d -> %d",
+            parsed_records, len(retry_ids), before, len(processed),
+        )
+    elif retry_errors:
+        logger.info("--retry-errors: log file %s does not exist; no retries to schedule", log_file)
 
     log_fh = log_file.open("a")
     log_fh.write(f"\n=== {datetime.now(timezone.utc).isoformat()} starting (apply={apply}) ===\n")
