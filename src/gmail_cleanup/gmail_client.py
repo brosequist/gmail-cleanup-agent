@@ -230,13 +230,25 @@ class GmailClient:
                 try:
                     meta = _retry_gmail(_get_meta, on_rebuild=self._rebuild_service)
                 except HttpError as e:
-                    # 404 happens when a message is deleted/spammed between
-                    # the threads.list call and this messages.get — race
-                    # condition with normal mailbox activity (Google's spam
-                    # filter, manual cleanup elsewhere). Skip and continue
-                    # rather than abort the entire run.
-                    if getattr(e.resp, "status", 0) == 404:
+                    status = getattr(e.resp, "status", 0)
+                    # 404: message vanished between threads.list and this
+                    # messages.get — race with normal mailbox activity
+                    # (Google's spam filter, manual cleanup elsewhere).
+                    if status == 404:
                         logger.warning("thread %s vanished between list and fetch; skipping", tid)
+                        continue
+                    # 400 "Precondition check failed": Gmail can't return
+                    # format=metadata for this message — typically a Google
+                    # Chat history message synced into Gmail, a draft, or
+                    # another non-standard kind that lacks From/Subject/Date.
+                    # One bad apple per ~tens-of-thousands of messages; skip
+                    # rather than abort the whole run.
+                    if status == 400 and b"recondition" in (e.content or b""):
+                        logger.warning(
+                            "thread %s rejected by Gmail (precondition failed; "
+                            "likely a Chat/draft message without headers); skipping",
+                            tid,
+                        )
                         continue
                     raise
                 hdrs = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
@@ -268,7 +280,19 @@ class GmailClient:
         try:
             th = _retry_gmail(_get, on_rebuild=self._rebuild_service)
         except HttpError as e:
-            if getattr(e.resp, "status", 0) == 404:
+            status = getattr(e.resp, "status", 0)
+            if status == 404:
+                return None
+            # See search_threads for context: Gmail returns 400
+            # "Precondition check failed" for messages it can't serve as
+            # format=metadata (Chat history, drafts, etc.). Treat as
+            # "no usable metadata" rather than aborting the caller.
+            if status == 400 and b"recondition" in (e.content or b""):
+                logger.warning(
+                    "thread %s rejected by Gmail (precondition failed); "
+                    "returning None",
+                    thread_id,
+                )
                 return None
             raise
         msgs = th.get("messages", [])

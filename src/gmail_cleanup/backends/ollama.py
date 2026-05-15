@@ -82,10 +82,16 @@ class OllamaBackend:
                         "ollama transient error (%s: %s) — retrying in %ds (attempt %d/%d)",
                         type(e).__name__, e, delay, attempt + 1, self.retries
                     )
-                    # Re-create the client on socket-level errors — the
-                    # existing connection-pool entry may be poisoned.
-                    self._client.close()
-                    self._client = httpx.Client(timeout=self.timeout, http2=False)
+                    # Do NOT close/recreate the shared client here. It is
+                    # shared across all concurrent classify_batch() workers;
+                    # closing it from one task makes sibling tasks raise
+                    # RuntimeError("Cannot send a request, as the client has
+                    # been closed.") on their in-flight .post() calls.
+                    # RuntimeError isn't retryable, so each sibling fails out
+                    # as a "backend error" instead of retrying its own
+                    # transient. httpx.Client is documented thread-safe and
+                    # its connection pool prunes failed connections on its
+                    # own, so the sleep-and-retry alone is sufficient.
                     time.sleep(delay)
                     continue
                 break
