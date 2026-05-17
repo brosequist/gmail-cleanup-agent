@@ -6,19 +6,52 @@
 #              will create these labels in your Gmail the first time
 #              they're applied. Each entry has a one-line description
 #              that goes into the LLM prompt to guide classification.
+#
+# DESIGN TIPS (from a real 312k-thread run):
+#
+# 1. Prefer SPECIFIC labels over CATCH-ALL labels. A generic label like
+#    "Notes" or "Misc" becomes an overflow bucket the model uses when it
+#    isn't sure — in one run, "Notes" collected 2,375 items including
+#    T-Mobile voicemail notifications from 2019, automated GitHub release
+#    emails, and stale WordPress moderation queues. None of those are
+#    actually notes. If you need a catch-all, leave it out and let the
+#    model trash uncategorizable items instead.
+#
+# 2. Split FINANCIAL labels when they have different retention needs.
+#    "Receipts" (purchase confirmations, you keep them for a few months)
+#    and "Statements" (monthly account statements, you keep them for years)
+#    are functionally distinct; lumping them together makes the post-run
+#    cleanup harder. Same for "Travel" (booked trips) vs "Travel Deals"
+#    (newsletters — trash these).
+#
+# 3. Don't add labels you won't actually use. Each label in the catalog
+#    becomes part of the LLM prompt, costing tokens on every batch and
+#    adding decision overhead.
 
 existing:
   - Taxes
   - Filed
-  - Notes
   - Politics
+  # NOTE: a generic "Notes" label is intentionally omitted — see the
+  # design tip above. If you do want one, add a tight description in
+  # auto_create that bounds what it should and should not contain.
 
 auto_create:
   Family: "personal correspondence from friends or family members"
-  Receipts: "order confirmations, invoices, payment receipts, account statements"
-  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results, insurance"
-  School: "emails from schools, teachers, educational institutions, and tuition platforms"
-  Sports: "league registrations, team schedules, coach updates, sports event tickets"
-  Organizations: "community groups, professional associations, volunteer organizations you're a member of"
-  Government: "emails from government offices (DMV, tax authorities, immigration, voter, etc.)"
-  Registrations: "event registration confirmations, account creation confirmations, program enrollments"
+  Receipts: "order confirmations, purchase receipts, shipping notifications with tracking, refund confirmations — short-retention transactional records (NOT recurring monthly/quarterly statements — those go to Statements)"
+  Statements: "monthly/quarterly account statements from banks, credit cards, brokerages, utilities — long-retention financial records (NOT one-off purchase receipts — those go to Receipts)"
+  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results, insurance EOBs — NOT generic health-tip newsletters or pharmacy coupons"
+  School: "emails from schools, teachers, university registrars, tuition platforms — NOT educational marketing or course-launch promos"
+  Sports: "league registrations, team schedules, coach updates, sports event tickets you bought — NOT sports news/commentary newsletters"
+  Organizations: "community groups, professional associations, volunteer organizations you are personally a member of — NOT marketing from groups you don't belong to"
+  Government: "communications from DMV, tax authorities (IRS, state), immigration, voter registration, courts, social security — NOT campaign/political fundraising"
+  Registrations: "event registration confirmations, account creation confirmations, program enrollments — confirmations of things you completed, NOT 'register soon!' recurring digests"
+
+# Optional labels — uncomment those you actually use. These appeared in
+# the example real-world run; yours may differ.
+#
+#  Travel: "booked trips: flight/hotel confirmations, itineraries, boarding passes — NOT travel deal newsletters"
+#  Insurance: "policy documents, claim correspondence, coverage updates from auto/home/health/life insurers"
+#  Subscriptions: "active subscription account state (renewals, billing changes, cancellations) — NOT subscription marketing"
+#  Veterans: "VA correspondence, military service organizations, veteran benefit notices — only useful if you're a veteran"
+#  Daycare: "daycare/preschool daily reports, billing, communications from caregivers — only useful if you're a parent"

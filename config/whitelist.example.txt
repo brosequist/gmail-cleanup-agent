@@ -5,6 +5,26 @@
 #   - lines with a full address match exactly
 # Comments start with #
 # One per line.
+#
+# WHEN to put a sender here vs let the rules handle it:
+#
+#   USE the whitelist for senders where the LLM has misclassified at
+#   least once and you don't want to take that risk again. It's a
+#   hard override — the model never sees these emails, so labels
+#   aren't assigned either; the emails just stay in your inbox
+#   untouched.
+#
+#   PREFER rules.md for general patterns ("trash all promo emails",
+#   "keep all .gov correspondence"). Rules scale; whitelist entries
+#   only catch the exact senders you list.
+#
+# Good whitelist candidates:
+#   - family members on consumer domains (gmail.com, outlook.com)
+#     where the LLM might misread a casual personal message as junk
+#   - your bank, broker, or employer's primary HR/payroll address
+#     where a wrong trash decision has high cost
+#   - the IRS, your state tax authority, or other regulators you
+#     genuinely cannot afford to miss email from
 
 # Examples:
 # @yourcompany.com
