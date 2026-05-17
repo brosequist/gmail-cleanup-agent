@@ -14,8 +14,9 @@ your mail to a vendor. This script is a middle path.
 
 ## Why this exists
 
-I had ~230k old emails I'd been ignoring for a decade. The math is
-brutal:
+I had ~313k old emails I'd been ignoring for a decade
+(see [docs/results.md](docs/results.md) for the full run breakdown).
+The math is brutal:
 
 | Path | Time | Money | Privacy |
 |---|---|---|---|

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-05-17T16:25:00Z",
+  "gmail_query": "older_than:90d -has:userlabels -in:trash -in:spam",
+  "gmail_match_total": 312982,
+  "unique_threads_classified": 312262,
+  "final_decisions": {
+    "trash": 259163,
+    "keep": 53099,
+    "errors_remaining": 0,
+    "trash_pct": 83.0,
+    "keep_pct": 17.0
+  },
+  "sessions": {
+    "count": 31,
+    "first_started_utc": "2026-05-08T21:14:39Z",
+    "last_started_utc": "2026-05-17T15:48:55Z",
+    "calendar_span_days": 8.78
+  },
+  "retry_pass": {
+    "started_utc": "2026-05-17T15:48:55Z",
+    "threads_retried": 809,
+    "new_decisions": {"keep": 144, "trash": 665},
+    "errors_after_retry": 0,
+    "resolution_pct": 100.0
+  },
+  "model": {
+    "backend": "ollama",
+    "name": "qwen3.6:35b-a3b-iq3_xxs-fixed",
+    "batch_size_threads": 20,
+    "concurrency": 4
+  },
+  "hardware": {
+    "node": "rog-mega-pc (k3s)",
+    "gpus": [
+      "AMD Radeon RX 9070 XT (Navi 48, gfx1201, 16 GB)",
+      "AMD Radeon RX 9060 XT (Navi 44, gfx1200, 16 GB)"
+    ],
+    "stack": "Ubuntu 24.04 + ROCm 7.2.2"
+  },
+  "observed_throughput": {
+    "late_stage_emails_per_min": 80,
+    "late_stage_emails_per_sec": 1.33
+  },
+  "apply_phase_run": false
+}
