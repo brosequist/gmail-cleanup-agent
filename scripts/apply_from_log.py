@@ -43,10 +43,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("apply_from_log")
 
-BATCH_SIZE = 25  # Per-batch sub-requests. Gmail's batch HTTP supports up to
-                 # 100 but processes them concurrently server-side; the
-                 # per-user concurrent-request ceiling is around 20, so 25
-                 # plus retry-on-429 hits the sweet spot.
+BATCH_SIZE = 20  # Per-batch sub-requests. Gmail's batch HTTP supports up to
+                 # 100 but processes them concurrently server-side; per-user
+                 # concurrent ceiling is ~20. Larger batches add 429s (with
+                 # retry) but don't increase throughput — per-account ceiling
+                 # is ~3.3 ops/sec regardless of batch size.
 MAX_429_RETRIES = 5  # Per-batch retry budget for transient 429s
 
 
@@ -146,15 +147,18 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
               help="--apply actually mutates Gmail. Default is dry-run preview.")
 @click.option("--limit", type=int, default=None,
               help="Apply at most this many actions (for staged rollout).")
+@click.option("--batch-size", type=int, default=BATCH_SIZE, show_default=True,
+              help="Sub-requests per batch HTTP call. Higher = faster but "
+                   "more 429s (Gmail's per-user concurrent limit is ~20).")
 @click.option("--batch-sleep", type=float, default=1.5, show_default=True,
-              help="Sleep between batches (seconds). Each batch is up to 100 "
+              help="Sleep between batches (seconds). Each batch is up to N "
                    "sub-requests at 5 QU each; Gmail limit is 250 QU/s/user, "
                    "so 1.5s keeps us comfortably under quota.")
 @click.option("--credentials", type=click.Path(exists=True, path_type=Path),
               default=REPO_ROOT / "config" / "credentials.json", show_default=True)
 @click.option("--token", type=click.Path(path_type=Path),
               default=REPO_ROOT / "config" / "token.json", show_default=True)
-def main(log_file, state_file, apply, limit, batch_sleep, credentials, token):
+def main(log_file, state_file, apply, limit, batch_size, batch_sleep, credentials, token):
     mode = "APPLY (mutating Gmail)" if apply else "dry-run (no mutations)"
     logger.info("mode: %s", mode)
     logger.info("log file: %s", log_file)
@@ -258,8 +262,8 @@ def main(log_file, state_file, apply, limit, batch_sleep, credentials, token):
                                   # apply uses _execute_with_retry directly
     _ = callback  # silence unused-warning in case linter sees it
 
-    # Split pending into batches of BATCH_SIZE
-    chunks = [pending[i:i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
+    # Split pending into batches of batch_size
+    chunks = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
     total = len(pending)
 
     for batch_idx, chunk in enumerate(chunks, 1):
@@ -325,7 +329,7 @@ def main(log_file, state_file, apply, limit, batch_sleep, credentials, token):
         if apply:
             state_file.write_text(json.dumps({"applied": sorted(applied_ids)}))
 
-        done = batch_idx * BATCH_SIZE
+        done = batch_idx * batch_size
         if done > total:
             done = total
         elapsed = time.time() - start
