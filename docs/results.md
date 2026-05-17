@@ -91,6 +91,71 @@ didn't end up writing a batch-duration log line.
 
 ## Apply pass
 
-This run was dry-run only (`--apply` was not used). Trash and label
-operations have not been performed on the inbox; the decision log
-serves as the audit trail for a later apply pass.
+After the dry-run was validated, the decisions were applied to Gmail
+via `scripts/apply_from_log.py --apply`. The script reads the
+existing `dry-run.log`, takes the latest decision per thread ID,
+and replays each via the Gmail batch HTTP API — no LLM calls, no
+re-classification. Resumable via `state-applied.json` and audited
+in `applied.log`.
+
+- **Wall-clock:** ~28 hours at ~3.1 ops/sec (Gmail's per-user
+  processing ceiling on a single account, not a client-side limit)
+- **API cost:** $0 (no LLM calls; well within Gmail's free quota)
+- **Recovery window:** all trashed threads remain in Gmail's Trash
+  for 30 days
+
+## Follow-on (iterative refinement)
+
+The initial classification removed the overwhelming majority of the
+backlog of unwanted email — **259,163 of 312,262 threads (83 %)** were
+moved to Trash in the apply pass. However, a post-hoc audit of the
+remaining 53,099 "keep" decisions found roughly **1,800 threads
+(3.4 % of the keeps) that were over-cautious calls** — i.e., further
+trash candidates the first pass missed:
+
+| Pattern | Count | Why the first pass kept them |
+|---|---:|---|
+| Old sign-in / verification-code notices | 746 | Time-sensitive at arrival; rules said "never trash a verification code" |
+| Recurring daily/weekly digests (e.g. Vet Tix) | 588 | Subjects referenced label-worthy categories (event registrations) |
+| LinkedIn job alerts | 286 | Look like personal-relevance "job opportunity for you" |
+| Social-network reply notifications (Reddit, Nextdoor) | 164 | Snippet often quotes the original post; *looks* personal |
+| **Total** | **~1,800** | |
+
+Two things were done in response:
+
+1. **Tool changes** (committed in [feat(classify): pass email age and
+   List-Unsubscribe presence to model](../README.md#what-gets-sent-to-the-llm)) —
+   the per-email prompt block now includes `Age: N days` (derived from
+   Gmail's `internalDate`) and `List-Unsubscribe: yes` (RFC 2369
+   header presence). Together these cover the missing signal that
+   the original pass needed.
+2. **`rules.example.md` updates** — explicit rules for each false-keep
+   pattern, leveraging the new metadata fields:
+   - sign-in / verification notices with `Age > 30 days` → TRASH
+   - recurring digests → TRASH regardless of category
+   - social-network reply notifications → TRASH unconditionally
+
+A **follow-on classification run** then re-processes only the
+previously-kept threads. Because it's roughly 1/6th the scope of the
+original run (53k vs 312k), it's correspondingly faster — typically
+**under 12 hours on the same hardware**, vs the original ~65 hours.
+
+The procedure:
+
+1. Update `config/rules.md` to incorporate the new metadata-aware
+   rules (see `config/rules.example.md` for the patterns).
+2. Move `state.json` aside so the classifier doesn't resume-skip
+   everything: `mv state.json state.json.first-pass`.
+3. Restrict the Gmail query to threads carrying the labels the first
+   pass applied — for example `older_than:90d label:Receipts OR
+   label:Registrations OR label:Notes -in:trash -in:spam`.
+4. Run `classify --dry-run` (it'll be much shorter — ~12 hrs at the
+   measured throughput).
+5. Audit the new dry-run.log diff against the first pass, then
+   `apply_from_log.py --apply` the deltas.
+
+Most "kept" threads are correctly kept; the follow-on flips only the
+~1,800-ish items per the categories above. The iterative-refinement
+pattern is the expected workflow: dry-run → audit → apply → audit
+the kept side → tighter rules → smaller follow-on. Each loop is
+cheaper than the last.

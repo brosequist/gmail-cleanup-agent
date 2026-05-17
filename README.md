@@ -34,6 +34,14 @@ The script is conservative by default: **dry-run is the default**,
 **trash is reversible for 30 days**, and there's a **sender whitelist**
 that the LLM cannot override.
 
+**Expect an iterative workflow.** A first pass typically clears the
+bulk of unwanted mail (~83 % of threads in the example run), but a
+post-hoc audit of the *kept* side usually surfaces a few-percent
+tail of false-keeps — recurring digests, old sign-in alerts, social-
+network reply notifications — that warrant a much shorter follow-on
+run with tightened rules. See [docs/results.md](docs/results.md) for
+the procedure and concrete numbers from one real run.
+
 ## Features
 
 - **Local-LLM-by-default** via Ollama or LM Studio. No email content

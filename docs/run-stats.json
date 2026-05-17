@@ -62,7 +62,26 @@
     },
     "concurrency_workers": 4
   },
-  "apply_phase_run": false,
+  "apply_phase_run": true,
+  "apply_method": "scripts/apply_from_log.py (replay from dry-run.log, no LLM)",
+  "apply_wallclock_hours_estimate": 28,
+  "post_apply_audit": {
+    "kept_threads_audited": 53099,
+    "over_cautious_keeps_identified": 1800,
+    "over_cautious_pct": 3.4,
+    "categories": {
+      "old_signin_verification_notices": 746,
+      "recurring_daily_weekly_digests": 588,
+      "linkedin_job_alerts": 286,
+      "social_network_reply_notifications": 164
+    },
+    "tool_changes_made": [
+      "Added Age (days) field to per-email prompt block (from internalDate)",
+      "Added List-Unsubscribe: yes header-presence flag to per-email prompt block",
+      "Updated rules.example.md with metadata-aware patterns for the false-keep categories"
+    ],
+    "follow_on_run_estimate_hours": 12
+  },
   "cost_estimates": {
     "methodology": "Token sizing from build_prompt() against shipped example rules/labels. See docs/cost-math.md for derivation and pricing references (early-2026 rates).",
     "batches": 15613,
