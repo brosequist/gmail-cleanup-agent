@@ -62,5 +62,19 @@
     },
     "concurrency_workers": 4
   },
-  "apply_phase_run": false
+  "apply_phase_run": false,
+  "cost_estimates": {
+    "methodology": "Token sizing from build_prompt() against shipped example rules/labels. See docs/cost-math.md for derivation and pricing references (early-2026 rates).",
+    "batches": 15613,
+    "input_tokens_total": 53082200,
+    "output_tokens_total": 3122600,
+    "cloud_backends_full_price_usd": {
+      "claude_haiku_4_5": 69,
+      "gpt_4_1_mini": 26,
+      "gpt_4o_mini": 10,
+      "gemini_2_0_flash": 7
+    },
+    "local_electricity_usd": 6,
+    "manual_triage_hours_at_3sec_per_email": 260
+  }
 }

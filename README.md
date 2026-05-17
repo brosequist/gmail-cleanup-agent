@@ -20,11 +20,11 @@ The math is brutal:
 
 | Path | Time | Money | Privacy |
 |---|---|---|---|
-| **Manual** (3 sec / email, average) | ~190 hrs ≈ 5 weeks full-time | $0 | full |
-| **This script, local LLM** on a consumer GPU | ~65 hrs of active LLM time (4 worker threads serialize on a single GPU; idle / downtime / failed-call retries excluded) | ~$5 of electricity | full — nothing leaves the machine |
-| **This script, Claude Haiku 4.5** | ~30–60 min | ~$51 | sender/subject/snippet leave the machine |
-| **This script, GPT-4o-mini** | ~30–60 min | ~$7 | same |
-| **This script, Gemini 2.0 Flash** | ~30–60 min | ~$5 | same |
+| **Manual** (3 sec / email, average) | ~260 hrs ≈ 6.5 weeks full-time | $0 | full |
+| **This script, local LLM** on a consumer GPU | ~65 hrs of active LLM time (4 worker threads serialize on a single GPU; idle / downtime / failed-call retries excluded) | ~$6 of electricity | full — nothing leaves the machine |
+| **This script, Claude Haiku 4.5** | ~60–100 min | ~$69 | sender/subject/snippet leave the machine |
+| **This script, GPT-4o-mini** | ~60–100 min | ~$10 | same |
+| **This script, Gemini 2.0 Flash** | ~60–100 min | ~$7 | same |
 
 (Token + cost math for the API rows is in [docs/cost-math.md](docs/cost-math.md).
 Local runtime is from my actual run on an RX 9070 XT + RX 9060 XT running
