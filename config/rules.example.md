@@ -31,7 +31,9 @@ Emails worth preserving:
 - **Registrations and confirmations** — event tickets, account creation
   confirmations, program enrollment confirmations, RSVP confirmations.
 - **Account security** — verification codes, security alerts, password
-  reset notifications (KEEP even if from no-reply addresses).
+  reset notifications from no-reply addresses **only if recent** (see
+  the Metadata signals section below — old sign-in/verification notices
+  have no archival value).
 
 ## What to TRASH
 
@@ -52,6 +54,20 @@ Emails worth preserving:
   ADDitude magazine, etc. — informational, not actionable, not personal.
 - **Job alerts** — automated job board emails (LinkedIn, Indeed, ZipRecruiter)
   unless they reference a specific application you submitted.
+- **Promotional emails wearing transactional clothing** — subjects like
+  "Your Receipt Is Here: Claim Valuable New Coupons Now!" or "Your
+  balance transfer offer ends soon" are STILL marketing. Look at the
+  snippet: if the body is selling you something, it's trash regardless
+  of the receipt-sounding subject.
+- **Recurring daily/weekly digests** — "Vet Tix Daily has 3 New Events",
+  "Today's Posts on /r/...", "Your Daily Briefing" — they reference
+  important-sounding things but have no archival value once they're
+  old. (Also covered in Metadata signals below.)
+- **Forwarded newsletters from organizational role addresses** —
+  e.g. a town veterans-services officer forwarding monthly veterans
+  newsletters. The forwarder is a real person but the content is
+  bulk-mail content; TRASH the forwarded copies unless something
+  in the forwarder's own commentary needs action.
 
 ## Decision principles
 
@@ -65,6 +81,10 @@ Emails worth preserving:
   to sell you something new can be trashed.
 - **Old promotional emails are extra trashable.** A sale that ended
   6 months ago is just clutter.
+- **Don't reach for a catch-all label.** If no specific label in the
+  catalog clearly fits a kept email, prefer TRASH over assigning a
+  generic "Notes" / "Misc" label. Catch-all labels become overflow
+  buckets full of noise that you'll have to clean up later.
 
 ## Metadata signals
 
