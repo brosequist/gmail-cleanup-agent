@@ -659,6 +659,8 @@ def _classify_pure(
             llm_batch.append({
                 "id": t.thread_id, "sender": t.sender,
                 "subject": t.subject, "snippet": t.snippet,
+                "age_days": t.age_days,
+                "has_list_unsubscribe": t.has_list_unsubscribe,
             })
 
     decisions: list[dict] = []

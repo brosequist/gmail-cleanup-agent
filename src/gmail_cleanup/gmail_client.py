@@ -83,6 +83,22 @@ def _retry_gmail(fn, *, attempts: int = 6, on_rebuild=None):
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 
+def _compute_age_days(internal_date_ms: str | int | None) -> int | None:
+    """Convert Gmail's `internalDate` (ms since epoch, as a string) into
+    a count of days from now. Returns None when the value is missing or
+    unparseable so the prompt builder can omit the field."""
+    if internal_date_ms is None:
+        return None
+    try:
+        ms = int(internal_date_ms)
+    except (TypeError, ValueError):
+        return None
+    age_seconds = time.time() - ms / 1000.0
+    if age_seconds < 0:
+        return 0
+    return int(age_seconds // 86400)
+
+
 @dataclass
 class ThreadSummary:
     """Compact view of a thread used for classification — never includes
@@ -92,6 +108,10 @@ class ThreadSummary:
     subject: str
     snippet: str
     date: str
+    # Optional metadata signals (None for older saved summaries that
+    # predate these fields):
+    age_days: int | None = None
+    has_list_unsubscribe: bool = False
 
 
 class GmailClient:
@@ -225,7 +245,8 @@ class GmailClient:
                         userId="me",
                         id=tid,
                         format="metadata",
-                        metadataHeaders=["From", "Subject", "Date"],
+                        metadataHeaders=["From", "Subject", "Date",
+                                         "List-Unsubscribe"],
                     ).execute()
                 try:
                     meta = _retry_gmail(_get_meta, on_rebuild=self._rebuild_service)
@@ -258,6 +279,8 @@ class GmailClient:
                     subject=hdrs.get("Subject", "(no subject)"),
                     snippet=snippet,
                     date=hdrs.get("Date", ""),
+                    age_days=_compute_age_days(meta.get("internalDate")),
+                    has_list_unsubscribe=bool(hdrs.get("List-Unsubscribe")),
                 )
                 yielded += 1
                 if max_threads and yielded >= max_threads:
@@ -275,7 +298,8 @@ class GmailClient:
         def _get(tid=thread_id):
             return self.service.users().threads().get(
                 userId="me", id=tid, format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
+                metadataHeaders=["From", "Subject", "Date",
+                                 "List-Unsubscribe"],
             ).execute()
         try:
             th = _retry_gmail(_get, on_rebuild=self._rebuild_service)
@@ -306,6 +330,8 @@ class GmailClient:
             subject=hdrs.get("Subject", "(no subject)"),
             snippet=first.get("snippet", ""),
             date=hdrs.get("Date", ""),
+            age_days=_compute_age_days(first.get("internalDate")),
+            has_list_unsubscribe=bool(hdrs.get("List-Unsubscribe")),
         )
 
     def trash_thread(self, thread_id: str) -> None:

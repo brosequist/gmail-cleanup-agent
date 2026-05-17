@@ -84,10 +84,20 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
 
     emails_block = []
     for i, e in enumerate(batch, 1):
+        # Optional metadata signals; only render when present so older
+        # callers and saved batches stay compatible.
+        meta_lines = []
+        age = e.get("age_days")
+        if age is not None:
+            meta_lines.append(f"Age: {age} days")
+        if e.get("has_list_unsubscribe"):
+            meta_lines.append("List-Unsubscribe: yes")
+        meta_str = "".join(f"{m}\n" for m in meta_lines)
         emails_block.append(
             f"## {i}. id: {e['id']}\n"
             f"From: {e['sender']}\n"
             f"Subject: {e['subject']}\n"
+            f"{meta_str}"
             f"Snippet: {e['snippet'][:300]}\n"
         )
 

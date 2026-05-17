@@ -63,12 +63,19 @@ For each email:
 - Subject
 - Snippet (the ~200-char preview Gmail provides; capped at 300 chars
   defensively by the prompt builder)
+- **Age** in days (derived from Gmail's `internalDate`). Lets the
+  classifier apply different heuristics for "received last week" vs
+  "received 5 years ago" — especially useful for inbox-bankruptcy
+  on years-old mail where time-sensitive notices (sign-in alerts,
+  verification codes, expired sales) are no longer actionable.
+- **`List-Unsubscribe: yes`** flag (RFC 2369). Personal mail almost
+  never has this; bulk / automated / marketing mail almost always
+  does. Very strong "this is automated" signal.
 - **Never the full body** unless you explicitly pass `--include-body`
   (off by default — and even then, snippet is preferred when
   available).
-- **Never the Date.** It's fetched alongside the metadata and stored
-  locally in the decision log, but it's not included in the LLM
-  prompt (kept the prompt smaller and the classifier age-agnostic).
+- **Never the exact Date.** Only the derived age-in-days makes it
+  into the prompt, not the raw timestamp.
 
 See [docs/privacy.md](docs/privacy.md) for the full breakdown.
 
