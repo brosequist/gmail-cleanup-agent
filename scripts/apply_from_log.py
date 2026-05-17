@@ -43,7 +43,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("apply_from_log")
 
-BATCH_SIZE = 100  # Gmail's max sub-requests per batch HTTP call
+BATCH_SIZE = 25  # Per-batch sub-requests. Gmail's batch HTTP supports up to
+                 # 100 but processes them concurrently server-side; the
+                 # per-user concurrent-request ceiling is around 20, so 25
+                 # plus retry-on-429 hits the sweet spot.
+MAX_429_RETRIES = 5  # Per-batch retry budget for transient 429s
 
 
 def load_latest_decisions(log_path: Path) -> dict[str, dict]:
@@ -60,6 +64,75 @@ def load_latest_decisions(log_path: Path) -> dict[str, dict]:
                 continue
             latest[r["id"]] = r
     return latest
+
+
+def _execute_with_retry(service, items, label_ids, audit_fh, counters,
+                         decisions_by_id, batch_idx):
+    """Execute a batch of trash/modify requests. Returns set of IDs that
+    successfully completed. 429s are retried with exponential backoff up to
+    MAX_429_RETRIES; persistent failures are logged as errors."""
+    successful: set[str] = set()
+    pending = list(items)
+    for attempt in range(MAX_429_RETRIES + 1):
+        if not pending:
+            break
+        retry: list[dict] = []
+
+        def cb(request_id, response, exception, _retry=retry):
+            if exception is None:
+                successful.add(request_id)
+                d = decisions_by_id[request_id]
+                if d["action"] == "trash":
+                    counters["trash"] += 1
+                    result = "trash"
+                else:
+                    counters["keep_labeled"] += 1
+                    result = "keep_labeled"
+                audit_fh.write(json.dumps({
+                    "id": request_id, "result": result,
+                    "label": d.get("label")}) + "\n")
+                return
+            err = str(exception)
+            if "429" in err or "rate" in err.lower() or "concurrent" in err.lower():
+                _retry.append(decisions_by_id[request_id])
+            else:
+                counters["error"] += 1
+                audit_fh.write(json.dumps({
+                    "id": request_id, "result": "error",
+                    "err": err[:200]}) + "\n")
+
+        batch = service.new_batch_http_request(callback=cb)
+        for d in pending:
+            tid = d["id"]
+            if d["action"] == "trash":
+                req = service.users().threads().trash(userId="me", id=tid)
+            else:
+                req = service.users().threads().modify(
+                    userId="me", id=tid,
+                    body={"addLabelIds": [label_ids[d["label"]]]})
+            batch.add(req, request_id=tid)
+        try:
+            batch.execute()
+        except Exception as e:  # noqa: BLE001
+            logger.error("batch %d transport failed on attempt %d: %s",
+                         batch_idx, attempt + 1, e)
+            retry = pending[:]
+
+        if retry:
+            sleep_for = 1.5 * (2 ** attempt)  # 1.5, 3, 6, 12, 24, 48
+            logger.warning("  batch %d: %d items hit 429 on attempt %d, "
+                           "backing off %.1fs", batch_idx, len(retry),
+                           attempt + 1, sleep_for)
+            time.sleep(sleep_for)
+        pending = retry
+
+    # Anything still pending after MAX_429_RETRIES is a permanent failure
+    for d in pending:
+        counters["error"] += 1
+        audit_fh.write(json.dumps({
+            "id": d["id"], "result": "error",
+            "err": f"429 after {MAX_429_RETRIES} retries"}) + "\n")
+    return successful
 
 
 @click.command(context_settings={"max_content_width": 100})
@@ -181,7 +254,10 @@ def main(log_file, state_file, apply, limit, batch_sleep, credentials, token):
                 {"id": request_id, "result": result, "label": label}) + "\n")
         return cb
 
-    callback = make_callback()
+    callback = make_callback()  # used only by old dry-run path below; real
+                                  # apply uses _execute_with_retry directly
+    _ = callback  # silence unused-warning in case linter sees it
+
     # Split pending into batches of BATCH_SIZE
     chunks = [pending[i:i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
     total = len(pending)
@@ -231,21 +307,18 @@ def main(log_file, state_file, apply, limit, batch_sleep, credentials, token):
             http_items_in_batch += 1
 
         if http_items_in_batch > 0:
-            try:
-                batch.execute()
-            except Exception as e:  # noqa: BLE001
-                logger.error("batch %d execute failed: %s", batch_idx, e)
-                counters["error"] += http_items_in_batch
-            # Successful batch sub-requests get their IDs added to applied set
-            # via the callback's logging; mark all attempted apply IDs as
-            # applied (callback errors are still recorded but not re-tried in
-            # this run — re-run with the same state-applied.json to re-attempt).
+            # Items still needing an HTTP call after we filtered out
+            # keep_nolabel and dry-run-only items.
+            to_apply = [
+                d for d in chunk
+                if d["action"] == "trash"
+                or (d["action"] == "keep" and d.get("label") and label_ids.get(d["label"]))
+            ]
+            successful = _execute_with_retry(
+                service, to_apply, label_ids, audit_fh, counters,
+                decisions_by_id, batch_idx)
             if apply:
-                for d in chunk:
-                    if d["action"] == "trash" or (
-                        d["action"] == "keep" and d.get("label")
-                    ):
-                        applied_ids.add(d["id"])
+                applied_ids.update(successful)
 
         # Per-batch checkpoint
         audit_fh.flush()
