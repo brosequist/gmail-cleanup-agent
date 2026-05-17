@@ -53,15 +53,41 @@ was `error`:
 
 ## Observed throughput
 
-- Late-stage steady-state: ~80 emails / minute (~1.33 / sec)
-- Per-batch latency observed in the console log spanned 21s–82s for
-  20-email batches — variance dominated by individual emails with
-  longer snippets and by occasional model-retry overhead.
+- Late-stage steady-state: ~80 emails / minute (~1.33 / sec wall-clock)
+- Per-batch latency: mean 56.5s, median 48.7s, min 2.4s, max 1551s
+  (20-email batches; variance dominated by individual emails with
+  longer snippets and by occasional model-retry overhead)
 
-The numbers above are the late-stage rate. Earlier sessions
-were a mix of faster batches and idle resume-scan time, so this
-isn't a clean compute-hours number — see the README's cost table
-for the approximate active-compute figure.
+## Compute time
+
+Reconstructed by parsing every `classified N emails in Xs` line in
+`dry-run.console.log` (covers 2026-05-09 → 2026-05-13). Post-May-13
+sessions weren't tee'd to the console log, so their compute is
+extrapolated from the measured per-email cost.
+
+| Metric | Measured (console range) | Extrapolated (post-May 13) | Total |
+|---|---:|---:|---:|
+| Emails classified | 205,926 | 106,336 | 312,262 |
+| Active GPU time | 43.0 h | 22.2 h | **~65 h** |
+| Avg cost per email | 0.75 s | 0.75 s | — |
+
+The four worker threads issue batches concurrently, but Ollama
+serializes them on a single GPU, so the GPU-busy time is the
+wall-clock time during productive batches — not the sum of per-worker
+batch latencies (which would 4× count the same GPU-seconds because
+three workers are sitting in the queue while one is being served).
+
+The reported per-batch latency (mean 56.5s, median 48.7s) is therefore
+queue-wait + GPU compute per worker; dividing by concurrency=4 gives
+the actual per-email GPU cost.
+
+**Sanity check:** the late-stage live throughput of 1.33 emails/sec
+wall-clock matches the console-range average exactly, so the
+extrapolation is self-consistent.
+
+**What's excluded:** idle resume-scan time at the start of each
+session, downtime between sessions, and failed-call retries that
+didn't end up writing a batch-duration log line.
 
 ## Apply pass
 

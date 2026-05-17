@@ -21,7 +21,7 @@ The math is brutal:
 | Path | Time | Money | Privacy |
 |---|---|---|---|
 | **Manual** (3 sec / email, average) | ~190 hrs ≈ 5 weeks full-time | $0 | full |
-| **This script, local LLM** on a consumer GPU | ~43 hrs of active LLM compute (sum of successful batch durations across 4 workers; idle / downtime / failed-call retries excluded) | ~$4 of electricity | full — nothing leaves the machine |
+| **This script, local LLM** on a consumer GPU | ~65 hrs of active LLM time (4 worker threads serialize on a single GPU; idle / downtime / failed-call retries excluded) | ~$5 of electricity | full — nothing leaves the machine |
 | **This script, Claude Haiku 4.5** | ~30–60 min | ~$51 | sender/subject/snippet leave the machine |
 | **This script, GPT-4o-mini** | ~30–60 min | ~$7 | same |
 | **This script, Gemini 2.0 Flash** | ~30–60 min | ~$5 | same |

@@ -42,5 +42,25 @@
     "late_stage_emails_per_min": 80,
     "late_stage_emails_per_sec": 1.33
   },
+  "compute_time": {
+    "methodology": "Parsed every 'classified N emails in Xs' line in dry-run.console.log (covers 2026-05-09 to 2026-05-13) for 10,946 batches across 205,926 emails. The 4 worker threads serialize on a single GPU via Ollama, so per-worker batch durations include queue-wait — dividing by concurrency=4 gives actual GPU compute time. Post-May-13 sessions were not tee'd to console; their compute is extrapolated at 0.75 GPU-seconds per email (matches late-stage live observed throughput).",
+    "measured_batches": 10946,
+    "measured_emails": 205926,
+    "measured_gpu_hours": 43.0,
+    "extrapolated_gpu_hours": 22.2,
+    "total_gpu_hours": 65.1,
+    "avg_gpu_seconds_per_email": 0.75,
+    "per_worker_batch_seconds_per_email_including_queue_wait": 3.0,
+    "batch_size_mean": 18.8,
+    "batch_size_median": 20,
+    "per_worker_batch_duration_seconds": {
+      "mean": 56.5,
+      "median": 48.7,
+      "min": 2.4,
+      "max": 1551.3,
+      "note": "includes queue-wait while other workers' batches are being served"
+    },
+    "concurrency_workers": 4
+  },
   "apply_phase_run": false
 }
