@@ -99,3 +99,31 @@ def test_command_exits_early_surfaces_runtime_error(monkeypatch):
 
     with pytest.raises(RuntimeError):
         portforward.maybe_start_pre_run()
+
+
+def test_terminate_proc_kills_running_subprocess(monkeypatch):
+    """Manually exercise the atexit cleanup path: stash a real
+    long-running subprocess, call _terminate_proc, verify it was
+    terminated (no longer running)."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 30"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    monkeypatch.setattr(portforward, "_proc", proc)
+
+    portforward._terminate_proc()
+
+    # The subprocess should be dead now
+    assert proc.poll() is not None
+    # Module state cleared
+    assert portforward._proc is None
+
+
+def test_terminate_proc_noop_when_no_process(monkeypatch):
+    """_terminate_proc with no subprocess in flight should not raise."""
+    monkeypatch.setattr(portforward, "_proc", None)
+    portforward._terminate_proc()  # must not raise
+    assert portforward._proc is None

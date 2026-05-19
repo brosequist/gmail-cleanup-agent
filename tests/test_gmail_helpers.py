@@ -135,3 +135,16 @@ def test_body_max_chars_is_sane():
     # Sanity: 4 KB cap protects token costs while preserving the meaningful
     # first paragraph of nearly every promotional email.
     assert 1_000 <= BODY_MAX_CHARS <= 16_000
+
+
+def test_extract_body_text_returns_full_text_caller_truncates():
+    """The extractor itself does NOT truncate — the cap is applied at
+    the call site (search_threads) after extraction. Verify the
+    extractor returns the full text so the caller's slice is what
+    actually enforces BODY_MAX_CHARS."""
+    huge = b"x" * (BODY_MAX_CHARS * 3)  # 3x the cap
+    payload = {"mimeType": "text/plain", "body": {"data": _b64(huge)}}
+    out = _extract_body_text(payload)
+    assert len(out) == len(huge)
+    # And the caller's slice [:BODY_MAX_CHARS] would shrink it to the cap
+    assert len(out[:BODY_MAX_CHARS]) == BODY_MAX_CHARS

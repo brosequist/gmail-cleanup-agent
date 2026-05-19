@@ -101,3 +101,53 @@ def test_json_mode_off_omits_response_format(monkeypatch):
     b.client.chat.completions.create = fake_create
     b.classify_batch("prompt")
     assert "response_format" not in captured
+
+
+def test_retries_on_transient_then_succeeds(monkeypatch):
+    """A retryable error (RateLimitError) on the first call should be
+    retried; the next success returns normally."""
+    monkeypatch.setattr("gmail_cleanup.backends.openai.time.sleep",
+                        lambda _s: None)
+    oa = _fresh_backend(monkeypatch, {"OPENAI_RETRIES": "3"})
+    b = oa.OpenAIBackend()
+
+    from openai import RateLimitError
+    attempts = []
+
+    def fake_create(**_kwargs):
+        attempts.append(1)
+        if len(attempts) < 2:
+            # Construct a minimal RateLimitError stand-in. The SDK's
+            # init signature varies across versions; raising the bare
+            # class via __new__ avoids the constructor entirely.
+            raise RateLimitError.__new__(RateLimitError)
+        msg = SimpleNamespace(content='{"decisions":[]}')
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    b.client = MagicMock()
+    b.client.chat.completions.create = fake_create
+    out = b.classify_batch("p")
+    assert out == '{"decisions":[]}'
+    assert len(attempts) == 2
+
+
+def test_no_retry_on_non_retryable(monkeypatch):
+    """A semantic 4xx (auth / bad request) MUST bubble up without
+    burning retries — those errors won't fix themselves."""
+    oa = _fresh_backend(monkeypatch, {"OPENAI_RETRIES": "5"})
+    b = oa.OpenAIBackend()
+
+    class _BadRequest(Exception):
+        pass
+
+    attempts = []
+
+    def fake_create(**_kwargs):
+        attempts.append(1)
+        raise _BadRequest("invalid model id")
+
+    b.client = MagicMock()
+    b.client.chat.completions.create = fake_create
+    with pytest.raises(_BadRequest):
+        b.classify_batch("p")
+    assert len(attempts) == 1  # NOT retried

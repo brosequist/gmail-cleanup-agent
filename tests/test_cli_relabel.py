@@ -173,3 +173,43 @@ def test_relabel_refetch_snippets_calls_fetch_thread_meta(tmp_path, patched,
     assert result.exit_code == 0, result.output
     # Verify the snippet refetch happened
     assert fetch_calls == ["t1"]
+
+
+def test_relabel_backend_error_keeps_existing_label(tmp_path, patched):
+    """If the backend raises on the first call, relabel must NOT drop
+    any labels — the existing label survives. This is the safe-failure
+    contract that makes relabel safe to re-run after a backend hiccup."""
+    src = tmp_path / "src.log"
+    _write_log(src, [
+        {"id": "t1", "from": "a", "subject": "s",
+         "action": "keep", "label": "Family"},
+    ])
+
+    class ExplodingBackend:
+        def classify_batch(self, prompt):
+            raise RuntimeError("relabel backend went down")
+
+    # Replace the FakeBackend that the fixture created with an exploder
+    patched["backend"] = ExplodingBackend()
+
+    from gmail_cleanup import cli as cli_module
+    import pytest as _pt
+    # Re-monkey via the existing patched dict — get_backend was set
+    # already; we need it to return ExplodingBackend now.
+    cli_module.get_backend = lambda: patched["backend"]
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "relabel", "--apply", "--input-log", str(src),
+        "--log-file", str(tmp_path / "relabel.log"),
+        "--state-file", str(tmp_path / "relabel-state.json"),
+        "--concurrency", "1",
+        "--confirm-every", "0",
+    ])
+    assert result.exit_code == 0, result.output
+    # No labels were moved despite --apply
+    assert patched["client"].modified == []
+    # The log shows the error row with the original label preserved
+    rows = [json.loads(l) for l in (tmp_path / "relabel.log").read_text()
+            .splitlines() if l.strip().startswith("{")]
+    assert any("relabel backend went down" in r.get("note", "") for r in rows)
