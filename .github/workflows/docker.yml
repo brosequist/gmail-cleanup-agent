@@ -4,10 +4,10 @@ name: publish-docker
 # Uses the repository's GITHUB_TOKEN — no manual secret setup needed.
 #
 # Image is published as:
-#   ghcr.io/brosequist/gmail-cleanup-agent:<tag>     (e.g. :v1.1.0)
-#   ghcr.io/brosequist/gmail-cleanup-agent:<version> (e.g. :1.1.0)
-#   ghcr.io/brosequist/gmail-cleanup-agent:1.1
-#   ghcr.io/brosequist/gmail-cleanup-agent:latest    (on default-branch builds)
+#   ghcr.io/brosequist/gmail-llm-cleanup:<tag>     (e.g. :v1.1.0)
+#   ghcr.io/brosequist/gmail-llm-cleanup:<version> (e.g. :1.1.0)
+#   ghcr.io/brosequist/gmail-llm-cleanup:1.1
+#   ghcr.io/brosequist/gmail-llm-cleanup:latest    (on default-branch builds)
 
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/gmail-cleanup-agent
+          images: ghcr.io/${{ github.repository_owner }}/gmail-llm-cleanup
           # See docs/image-tagging.md for the full set; in short:
           #   v1.2.3 -> :v1.2.3, :1.2.3, :1.2, :latest
           tags: |

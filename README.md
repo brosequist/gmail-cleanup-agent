@@ -159,20 +159,31 @@ Three options, in increasing order of isolation:
 
 ```bash
 # 1) PyPI (any working directory; config lives in ./config/)
-pipx install gmail-cleanup-agent              # base
-pipx install 'gmail-cleanup-agent[claude]'    # + Anthropic
-pipx install 'gmail-cleanup-agent[openai]'    # + OpenAI / LM Studio / llama.cpp
+pipx install gmail-llm-cleanup              # base
+pipx install 'gmail-llm-cleanup[claude]'    # + Anthropic
+pipx install 'gmail-llm-cleanup[openai]'    # + OpenAI / LM Studio / llama.cpp
 
 # 2) Docker (no Python on the host)
 docker run --rm -it \
   -v "$PWD/config:/config" -v "$PWD:/work" -w /work \
-  ghcr.io/brosequist/gmail-cleanup-agent:latest classify --dry-run
+  ghcr.io/brosequist/gmail-llm-cleanup:latest classify --dry-run
 
 # 3) Editable checkout (for hacking on the tool itself)
 git clone https://github.com/brosequist/gmail-cleanup-agent
 cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[openai]'   # or .[claude], or just .
+```
+
+The PyPI distribution name is `gmail-llm-cleanup` (the obvious
+`gmail-cleanup-agent` name is already taken on PyPI by an unrelated
+project). The Python import name (`gmail_cleanup`) and console script
+(`gmail-cleanup`) are unaffected:
+
+```bash
+pipx install gmail-llm-cleanup
+gmail-cleanup --help            # binary on PATH
+python -c "import gmail_cleanup" # import as a library
 ```
 
 For the PyPI and Docker paths, the CLI looks for `config/` in your

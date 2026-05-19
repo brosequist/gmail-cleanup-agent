@@ -5,11 +5,16 @@ name: publish-pypi
 # token at publish time.
 #
 # One-time setup at https://pypi.org/manage/account/publishing/:
-#   PyPI project name: gmail-cleanup-agent
+#   PyPI project name: gmail-llm-cleanup
 #   Owner:             brosequist
 #   Repository name:   gmail-cleanup-agent
 #   Workflow filename: release.yml
 #   Environment name:  pypi
+#
+# The PyPI distribution name (`gmail-llm-cleanup`) differs from the
+# GitHub repo name (`gmail-cleanup-agent`) because `gmail-cleanup-agent`
+# is already taken on PyPI by a different project. The Python import
+# (`gmail_cleanup`) and console script (`gmail-cleanup`) are unchanged.
 #
 # After that, every `git push --tags` of a v* tag publishes to PyPI.
 
@@ -57,7 +62,7 @@ jobs:
     # and gives the repo owner a place to add manual-approval gates later.
     environment:
       name: pypi
-      url: https://pypi.org/project/gmail-cleanup-agent/
+      url: https://pypi.org/project/gmail-llm-cleanup/
     permissions:
       id-token: write   # required for OIDC to PyPI
     steps:

@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gmail-cleanup-agent"
-version = "1.1.1"
+name = "gmail-llm-cleanup"
+version = "1.1.2"
 description = "Triage a Gmail inbox with a local or cloud LLM"
 readme = "README.md"
 license = { text = "MIT" }

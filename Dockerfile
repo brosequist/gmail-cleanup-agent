@@ -7,7 +7,7 @@
 #     -v "$PWD/config:/config" \
 #     -v "$PWD:/work" -w /work \
 #     -e GMAIL_CLEANUP_CONFIG_DIR=/config \
-#     ghcr.io/brosequist/gmail-cleanup-agent:latest classify --dry-run
+#     ghcr.io/brosequist/gmail-llm-cleanup:latest classify --dry-run
 
 FROM python:3.12-slim AS build
 WORKDIR /src
@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir build && python -m build --wheel
 
 FROM python:3.12-slim
 
-LABEL org.opencontainers.image.title="gmail-cleanup-agent"
+LABEL org.opencontainers.image.title="gmail-llm-cleanup"
 LABEL org.opencontainers.image.description="Triage a Gmail inbox with a local or cloud LLM"
 LABEL org.opencontainers.image.source="https://github.com/brosequist/gmail-cleanup-agent"
 LABEL org.opencontainers.image.licenses="MIT"
