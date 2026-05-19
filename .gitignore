@@ -4,6 +4,7 @@ config/token.json
 config/labels.yaml
 config/rules.md
 config/whitelist.txt
+config/backend.env
 
 # Run artifacts
 *.log

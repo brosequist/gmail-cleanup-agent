@@ -174,11 +174,17 @@ cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 4. Configure
-export GCA_BACKEND=ollama
-export OLLAMA_HOST=http://localhost:11434
-export OLLAMA_MODEL=qwen3:8b     # or whatever you pulled
+# 4. Configure — copy the template and uncomment the Ollama section
+cp config/backend.env.example config/backend.env
+# edit config/backend.env: uncomment GCA_BACKEND / OLLAMA_HOST / OLLAMA_MODEL
+# (you can leave the other backend sections commented out)
 ```
+
+`config/backend.env` is loaded automatically every time you run
+`python -m gmail_cleanup ...`. Shell-exported env vars still override
+what's in the file, so one-off overrides (e.g.
+`OLLAMA_MODEL=qwen3.6:35b-a3b python -m gmail_cleanup classify ...`)
+work without editing the file.
 
 ### Option B: LM Studio
 
@@ -196,12 +202,11 @@ pip install -r requirements.txt openai     # +openai SDK for the
                                             # OpenAI-compatible client
 
 # 3. Configure — LM Studio speaks the OpenAI wire format
-export GCA_BACKEND=openai
-export OPENAI_BASE_URL=http://localhost:1234/v1
-export OPENAI_API_KEY=not-needed              # placeholder; LM Studio
-                                              # doesn't check
-export OPENAI_MODEL="qwen2.5-7b-instruct"     # exactly as LM Studio
-                                              # lists it in the Server tab
+cp config/backend.env.example config/backend.env
+# edit config/backend.env: uncomment the "OpenAI-compatible" block and set
+#   OPENAI_BASE_URL=http://localhost:1234/v1
+#   OPENAI_API_KEY=not-needed             # placeholder; LM Studio doesn't check
+#   OPENAI_MODEL=qwen2.5-7b-instruct      # exact id from LM Studio's Server tab
 ```
 
 The same `GCA_BACKEND=openai` setup also works with llama.cpp's
@@ -220,18 +225,21 @@ full set of gotchas.
 ## Quick start — cloud LLM (faster, costs money)
 
 ```bash
-# Claude
-pip install -r requirements.txt anthropic
-export GCA_BACKEND=claude
-export ANTHROPIC_API_KEY=sk-ant-...
-export CLAUDE_MODEL=claude-haiku-4-5-20251001
+# Install the SDK for whichever provider you're using
+pip install -r requirements.txt anthropic    # for Claude
+# or
+pip install -r requirements.txt openai       # for real OpenAI
 
-# Or OpenAI
-pip install -r requirements.txt openai
-export GCA_BACKEND=openai
-export OPENAI_API_KEY=sk-...
-export OPENAI_MODEL=gpt-4o-mini    # or gpt-4.1-mini for higher quality
+# Configure via the env file
+cp config/backend.env.example config/backend.env
 ```
+
+Then edit `config/backend.env` and uncomment the **Anthropic Claude**
+section (set `ANTHROPIC_API_KEY` + `CLAUDE_MODEL`) **or** the
+**OpenAI-compatible** section pointed at real OpenAI (set
+`OPENAI_API_KEY` to your real key + `OPENAI_MODEL=gpt-4o-mini` or
+`gpt-4.1-mini`). Leave `OPENAI_BASE_URL` at the default (or unset) to
+hit `api.openai.com`.
 
 ## Set up OAuth + run
 
