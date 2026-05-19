@@ -24,8 +24,17 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 # Both extras pre-installed so the image works with every backend.
 # Image stays small (~150 MB) because anthropic + openai are pure-Python.
+#
+# NOTE: `*.whl[claude,openai]` looks like pip-extras syntax but `[…]` is
+# a shell glob character class, so the shell tries to match wheels
+# ending in `c`/`l`/`a`/`u`/`d`/`e`/`,`/`o`/`p`/`n`/`i`. That always
+# fails to expand and pip gets a literal `*.whl[claude,openai]`
+# argument. Capture the wheel path first, then quote.
 COPY --from=build /src/dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl[claude,openai] && rm -rf /tmp/*.whl
+RUN set -e; \
+    whl=$(ls /tmp/*.whl); \
+    pip install --no-cache-dir "${whl}[claude,openai]" && \
+    rm -rf /tmp/*.whl
 
 # Conventional mount points:
 #   /config — credentials.json, token.json, labels.yaml, rules.md, etc.
