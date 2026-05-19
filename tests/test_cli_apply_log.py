@@ -26,12 +26,27 @@ def _write_log(p: Path, rows: list[dict]):
 
 
 @pytest.fixture
-def patched_gmail(monkeypatch, patch_repo_root):
+def patched_gmail(monkeypatch, patch_repo_root, tmp_path):
     """Replace the GmailClient that applylog.run_apply_log instantiates
-    with a fake. Returns the FakeGmailClient so tests can assert mutations."""
+    with a fake. Returns the FakeGmailClient so tests can assert
+    mutations.
+
+    Also writes dummy `credentials.json` + `token.json` files at
+    `tmp_path` so tests can pass `--credentials` / `--token` flags
+    pointing at real files — the apply-log CLI's `--credentials` option
+    has `exists=True` validation and its default is captured at
+    decoration time (so a fixture-level monkeypatch on CONFIG_DIR
+    can't redirect it). The fake GmailClient ignores both paths.
+    """
     from tests._fakes import FakeGmailClient
 
-    state = {"client": None}
+    state = {
+        "client": None,
+        "creds_path": tmp_path / "test-credentials.json",
+        "token_path": tmp_path / "test-token.json",
+    }
+    state["creds_path"].write_text("{}")
+    state["token_path"].write_text("{}")
 
     def factory(creds, token):
         state["client"] = FakeGmailClient()
@@ -39,6 +54,14 @@ def patched_gmail(monkeypatch, patch_repo_root):
 
     monkeypatch.setattr(applylog_module, "GmailClient", factory)
     return state
+
+
+def _creds_args(patched_gmail) -> list[str]:
+    """Reusable --credentials/--token args for apply-log invocations."""
+    return [
+        "--credentials", str(patched_gmail["creds_path"]),
+        "--token", str(patched_gmail["token_path"]),
+    ]
 
 
 def test_apply_log_dry_run_writes_preview_no_mutations(tmp_path, patched_gmail):
@@ -53,6 +76,7 @@ def test_apply_log_dry_run_writes_preview_no_mutations(tmp_path, patched_gmail):
         "apply-log", "--dry-run", "--log-file", str(log),
         "--state-file", str(tmp_path / "state-applied.json"),
         "--audit-log", str(tmp_path / "preview.log"),
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
@@ -86,6 +110,7 @@ def test_apply_log_apply_mutates_and_checkpoints(tmp_path, patched_gmail):
         "--state-file", str(state_path),
         "--audit-log", str(audit_path),
         "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
@@ -117,6 +142,7 @@ def test_apply_log_resumes_skipping_already_applied(tmp_path, patched_gmail):
         "--state-file", str(state_path),
         "--audit-log", str(audit_path),
         "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
@@ -146,6 +172,7 @@ def test_apply_log_limit_caps_actions(tmp_path, patched_gmail):
         "--audit-log", str(audit_path),
         "--limit", "2",
         "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
@@ -166,6 +193,7 @@ def test_apply_log_error_action_is_skipped(tmp_path, patched_gmail):
     result = runner.invoke(cli, [
         "apply-log", "--dry-run", "--log-file", str(log),
         "--audit-log", str(audit_path),
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
@@ -186,6 +214,7 @@ def test_apply_log_latest_decision_wins(tmp_path, patched_gmail):
     result = runner.invoke(cli, [
         "apply-log", "--dry-run", "--log-file", str(log),
         "--audit-log", str(audit_path),
+        *_creds_args(patched_gmail),
     ])
     assert result.exit_code == 0, result.output
 
