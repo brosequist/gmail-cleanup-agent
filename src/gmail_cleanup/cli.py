@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -36,8 +37,34 @@ from .prompt import (
 from .backends import get_backend
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_DIR = REPO_ROOT / "config"
+# REPO_ROOT and CONFIG_DIR resolve at runtime, not at module import time,
+# so the CLI works the same whether it's run from an editable checkout
+# (`pip install -e .`), a wheel install from PyPI, or a Docker image.
+#
+# Resolution order for the config dir:
+#   1. $GMAIL_CLEANUP_CONFIG_DIR if set (explicit override; Docker uses this)
+#   2. ./config in the current working directory if that's an existing dir
+#   3. <cwd>/config as a writable default (created on first config copy)
+#
+# State / log defaults are similarly anchored at the current working
+# directory so a PyPI-installed `gmail-cleanup` produces files where the
+# user invoked it, not in site-packages.
+def _work_root() -> Path:
+    return Path(os.environ.get("GMAIL_CLEANUP_WORK_DIR", Path.cwd())).resolve()
+
+
+def _resolve_config_dir() -> Path:
+    env = os.environ.get("GMAIL_CLEANUP_CONFIG_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return _work_root() / "config"
+
+
+# Module-level aliases kept for backward compat with the test suite
+# (which monkeypatches these). Treat them as the *current* resolved
+# values — re-evaluate inside functions when freshness matters.
+REPO_ROOT = _work_root()
+CONFIG_DIR = _resolve_config_dir()
 
 logger = logging.getLogger("gmail_cleanup")
 
@@ -51,9 +78,13 @@ def setup_logging(verbose: bool) -> None:
 
 
 def _client() -> GmailClient:
+    # Always re-resolve so a freshly-set env var or a test monkeypatch
+    # of CONFIG_DIR is picked up at call time.
+    cfg = Path(os.environ.get("GMAIL_CLEANUP_CONFIG_DIR")) if os.environ.get(
+        "GMAIL_CLEANUP_CONFIG_DIR") else CONFIG_DIR
     return GmailClient(
-        credentials_path=CONFIG_DIR / "credentials.json",
-        token_path=CONFIG_DIR / "token.json",
+        credentials_path=cfg / "credentials.json",
+        token_path=cfg / "token.json",
     )
 
 
@@ -117,14 +148,14 @@ def auth():
 @click.option(
     "--state-file",
     type=click.Path(path_type=Path),
-    default=REPO_ROOT / "state.json",
-    show_default=True,
+    default=None,
+    help="Resume checkpoint of processed thread IDs. Default: ./state.json.",
 )
 @click.option(
     "--log-file",
     type=click.Path(path_type=Path),
     default=None,
-    help="Override default log file.",
+    help="Decision log. Default: ./dry-run.log (or ./applied.log under --apply).",
 )
 @click.option(
     "--concurrency",
@@ -175,12 +206,16 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
         logging.getLogger().addHandler(fh)
         logger.info("mirroring console output to %s", console_log)
 
+    work = _work_root()
+    cfg = _resolve_config_dir()
+    if state_file is None:
+        state_file = work / "state.json"
     if log_file is None:
-        log_file = REPO_ROOT / ("applied.log" if apply else "dry-run.log")
+        log_file = work / ("applied.log" if apply else "dry-run.log")
 
-    catalog = LabelCatalog.load(CONFIG_DIR / "labels.yaml")
-    whitelist = load_whitelist(CONFIG_DIR / "whitelist.txt")
-    rules = (CONFIG_DIR / "rules.md").read_text()
+    catalog = LabelCatalog.load(cfg / "labels.yaml")
+    whitelist = load_whitelist(cfg / "whitelist.txt")
+    rules = (cfg / "rules.md").read_text()
     backend = get_backend()
     logger.info("backend: %s", backend)
     logger.info("catalog: %d existing + %d auto-create labels",
@@ -357,9 +392,8 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
 @click.option(
     "--input-log",
     type=click.Path(path_type=Path, exists=True),
-    default=REPO_ROOT / "dry-run.log",
-    show_default=True,
-    help="Decision log to read already-kept emails from (dry-run.log or applied.log).",
+    default=None,
+    help="Decision log to read already-kept emails from. Default: ./dry-run.log.",
 )
 @click.option(
     "--batch-size", type=int, default=20, show_default=True,
@@ -386,12 +420,12 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
     help="Fetch each email's snippet from Gmail for richer context (1 API call per email — slower, but better labels).",
 )
 @click.option(
-    "--state-file", type=click.Path(path_type=Path),
-    default=REPO_ROOT / "relabel-state.json", show_default=True,
+    "--state-file", type=click.Path(path_type=Path), default=None,
+    help="Resume checkpoint of relabeled IDs. Default: ./relabel-state.json.",
 )
 @click.option(
     "--log-file", type=click.Path(path_type=Path), default=None,
-    help="Override default log file (relabel.log).",
+    help="Relabel log. Default: ./relabel.log.",
 )
 def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
             concurrency, refetch_snippets, state_file, log_file):
@@ -404,10 +438,16 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
     kept. Use this after expanding your label catalog to reorganize
     without redoing the trash decisions.
     """
+    work = _work_root()
+    cfg = _resolve_config_dir()
+    if input_log is None:
+        input_log = work / "dry-run.log"
+    if state_file is None:
+        state_file = work / "relabel-state.json"
     if log_file is None:
-        log_file = REPO_ROOT / "relabel.log"
+        log_file = work / "relabel.log"
 
-    catalog = LabelCatalog.load(CONFIG_DIR / "labels.yaml")
+    catalog = LabelCatalog.load(cfg / "labels.yaml")
     backend = get_backend()
     logger.info("backend: %s", backend)
     logger.info("catalog: %d keep-labels available", len(catalog.all_keep_labels))
@@ -817,13 +857,13 @@ def _checkpoint(state_file: Path, processed: set[str]) -> None:
 @cli.command(name="apply-log", context_settings={"max_content_width": 100})
 @click.option(
     "--log-file", type=click.Path(exists=True, path_type=Path),
-    default=REPO_ROOT / "dry-run.log", show_default=True,
-    help="Source of decisions to replay (typically dry-run.log).",
+    default=None,
+    help="Source of decisions to replay. Default: ./dry-run.log.",
 )
 @click.option(
     "--state-file", type=click.Path(path_type=Path),
-    default=REPO_ROOT / "state-applied.json", show_default=True,
-    help="Tracks applied IDs across runs for resume.",
+    default=None,
+    help="Resume checkpoint of applied IDs. Default: ./state-applied.json.",
 )
 @click.option(
     "--apply/--dry-run", default=False, show_default=True,
@@ -844,16 +884,20 @@ def _checkpoint(state_file: Path, processed: set[str]) -> None:
 )
 @click.option(
     "--credentials", type=click.Path(exists=True, path_type=Path),
-    default=CONFIG_DIR / "credentials.json", show_default=True,
+    default=None,
+    help="OAuth client secrets file. Default: $GMAIL_CLEANUP_CONFIG_DIR or "
+         "./config/credentials.json.",
 )
 @click.option(
     "--token", type=click.Path(path_type=Path),
-    default=CONFIG_DIR / "token.json", show_default=True,
+    default=None,
+    help="OAuth token cache. Default: $GMAIL_CLEANUP_CONFIG_DIR or "
+         "./config/token.json.",
 )
 @click.option(
     "--audit-log", type=click.Path(path_type=Path), default=None,
-    help="Override default audit log (applied.log in --apply mode, "
-         "replay-preview.log otherwise).",
+    help="Audit log. Default: ./applied.log under --apply, "
+         "./replay-preview.log under --dry-run.",
 )
 def apply_log(log_file, state_file, apply, limit, batch_size, batch_sleep,
               credentials, token, audit_log):
@@ -863,8 +907,32 @@ def apply_log(log_file, state_file, apply, limit, batch_size, batch_sleep,
     via Gmail's batch HTTP API. Resumable: applied IDs are checkpointed
     to --state-file after every batch.
     """
+    work = _work_root()
+    cfg = _resolve_config_dir()
+    if log_file is None:
+        log_file = work / "dry-run.log"
+    if state_file is None:
+        state_file = work / "state-applied.json"
+    if credentials is None:
+        credentials = cfg / "credentials.json"
+    if token is None:
+        token = cfg / "token.json"
     if audit_log is None:
-        audit_log = REPO_ROOT / ("applied.log" if apply else "replay-preview.log")
+        audit_log = work / ("applied.log" if apply else "replay-preview.log")
+
+    # Defer the exists check on --credentials until after our default
+    # resolution so the error message is meaningful for users who
+    # haven't run `auth` yet.
+    if not Path(credentials).exists():
+        raise click.UsageError(
+            f"OAuth credentials file not found: {credentials}\n"
+            "Either run `gmail-cleanup auth` to set up OAuth, or pass "
+            "--credentials/--token explicitly, or set "
+            "GMAIL_CLEANUP_CONFIG_DIR to a directory containing both files."
+        )
+    if not Path(log_file).exists():
+        raise click.UsageError(f"Decision log not found: {log_file}")
+
     applylog.run_apply_log(
         log_file=log_file, state_file=state_file, apply=apply,
         limit=limit, batch_size=batch_size, batch_sleep=batch_sleep,

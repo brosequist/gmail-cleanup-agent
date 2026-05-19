@@ -1,0 +1,69 @@
+name: publish-pypi
+
+# Publish to PyPI via Trusted Publishers (OIDC). No API token is stored
+# anywhere — PyPI verifies the workflow's identity from the GitHub OIDC
+# token at publish time.
+#
+# One-time setup at https://pypi.org/manage/account/publishing/:
+#   PyPI project name: gmail-cleanup-agent
+#   Owner:             brosequist
+#   Repository name:   gmail-cleanup-agent
+#   Workflow filename: release.yml
+#   Environment name:  pypi
+#
+# After that, every `git push --tags` of a v* tag publishes to PyPI.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or sha to publish (e.g. v1.1.0). Defaults to the workflow's ref."
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Honor the manual-dispatch ref so re-publishing an existing tag works
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Show built artifacts
+        run: ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Environment binding lets PyPI's Trusted-Publisher rule require it,
+    # and gives the repo owner a place to add manual-approval gates later.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/gmail-cleanup-agent/
+    permissions:
+      id-token: write   # required for OIDC to PyPI
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

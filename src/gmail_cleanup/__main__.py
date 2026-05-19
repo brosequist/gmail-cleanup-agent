@@ -21,22 +21,38 @@ one-off runs with overrides.
 want to use.
 """
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Repo root is two levels up from this file (src/gmail_cleanup/__main__.py).
-# For editable installs (`pip install -e .`) this still points at the
-# checkout. For non-editable installs the path is meaningless but
-# load_dotenv silently no-ops on missing files, so it's harmless.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+def _resolve_backend_env_path() -> Path:
+    """Where to look for the optional `backend.env` dotenv file.
+
+    Order (highest precedence first):
+      1. $GMAIL_CLEANUP_CONFIG_DIR/backend.env (explicit override; Docker uses this)
+      2. ./config/backend.env in the current working directory
+      3. <package-root>/config/backend.env — only meaningful for editable
+         installs (`pip install -e .`); harmless on wheel installs since
+         load_dotenv silently no-ops on missing files.
+    """
+    env = os.environ.get("GMAIL_CLEANUP_CONFIG_DIR")
+    if env:
+        return Path(env).expanduser() / "backend.env"
+    cwd_path = Path.cwd() / "config" / "backend.env"
+    if cwd_path.is_file():
+        return cwd_path
+    # Editable-install fallback: __file__ -> src/gmail_cleanup/__main__.py;
+    # parents[2] is the repo root next to its config/ dir.
+    return Path(__file__).resolve().parents[2] / "config" / "backend.env"
 
 
 def main():
     """Console-script entry point used by both `python -m gmail_cleanup`
     and the installed `gmail-cleanup` command. Loads backend.env, runs
     the optional pre-run hook, then dispatches to the Click CLI."""
-    load_dotenv(_REPO_ROOT / "config" / "backend.env", override=False)
+    load_dotenv(_resolve_backend_env_path(), override=False)
 
     # Import AFTER load_dotenv so the backend factory sees the loaded env
     # vars when it inspects os.environ.

@@ -37,9 +37,15 @@ def config_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def patch_repo_root(monkeypatch, tmp_path, config_dir):
-    """Force REPO_ROOT and CONFIG_DIR in cli.py to point at the tmp dir
-    so default paths (state.json, dry-run.log) land in tmp, not in the
-    real checkout."""
+    """Force the CLI's working-dir + config-dir resolution to point at
+    the tmp dir so default paths (state.json, dry-run.log) land in tmp,
+    not in the real checkout.
+
+    Uses the same env-var overrides that end users would use, plus a
+    backstop monkeypatch on the module-level constants for any
+    decoration-time defaults that snapshot them."""
+    monkeypatch.setenv("GMAIL_CLEANUP_WORK_DIR", str(tmp_path))
+    monkeypatch.setenv("GMAIL_CLEANUP_CONFIG_DIR", str(config_dir))
     from gmail_cleanup import cli
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)

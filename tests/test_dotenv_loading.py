@@ -69,3 +69,38 @@ def test_missing_backend_env_does_not_crash(tmp_path):
     out = _run_entrypoint(tmp_path, backend_env_lines=None)
     # Got past the load_dotenv call (printed the expected lines)
     assert "GCA_BACKEND=" in out
+
+
+# ---------------- _resolve_backend_env_path resolver ----------------
+
+
+def test_resolver_uses_explicit_env_dir(tmp_path, monkeypatch):
+    """$GMAIL_CLEANUP_CONFIG_DIR overrides everything else."""
+    from gmail_cleanup.__main__ import _resolve_backend_env_path
+    monkeypatch.setenv("GMAIL_CLEANUP_CONFIG_DIR", str(tmp_path))
+    assert _resolve_backend_env_path() == tmp_path / "backend.env"
+
+
+def test_resolver_falls_back_to_cwd_config(tmp_path, monkeypatch):
+    """If no env var is set but ./config/backend.env exists in cwd,
+    it wins over the package-relative fallback."""
+    from gmail_cleanup.__main__ import _resolve_backend_env_path
+    monkeypatch.delenv("GMAIL_CLEANUP_CONFIG_DIR", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "backend.env").write_text("GCA_BACKEND=ollama\n")
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_backend_env_path() == cfg / "backend.env"
+
+
+def test_resolver_falls_back_to_package_root(tmp_path, monkeypatch):
+    """No env var, no cwd config — falls back to the package-relative
+    path (the editable-install convenience)."""
+    from gmail_cleanup.__main__ import _resolve_backend_env_path
+    monkeypatch.delenv("GMAIL_CLEANUP_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # no ./config here
+    out = _resolve_backend_env_path()
+    # Path comes from __file__ -> ../../../config/backend.env; we only
+    # assert the basename + parent-dir name, not the exact prefix.
+    assert out.name == "backend.env"
+    assert out.parent.name == "config"

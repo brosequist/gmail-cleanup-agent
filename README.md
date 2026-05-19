@@ -153,6 +153,32 @@ A few label-system properties worth knowing up front:
   backends and slow down local runs. See the design tips in
   [`config/labels.example.yaml`](config/labels.example.yaml).
 
+## Install
+
+Three options, in increasing order of isolation:
+
+```bash
+# 1) PyPI (any working directory; config lives in ./config/)
+pipx install gmail-cleanup-agent              # base
+pipx install 'gmail-cleanup-agent[claude]'    # + Anthropic
+pipx install 'gmail-cleanup-agent[openai]'    # + OpenAI / LM Studio / llama.cpp
+
+# 2) Docker (no Python on the host)
+docker run --rm -it \
+  -v "$PWD/config:/config" -v "$PWD:/work" -w /work \
+  ghcr.io/brosequist/gmail-cleanup-agent:latest classify --dry-run
+
+# 3) Editable checkout (for hacking on the tool itself)
+git clone https://github.com/brosequist/gmail-cleanup-agent
+cd gmail-cleanup-agent
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[openai]'   # or .[claude], or just .
+```
+
+For the PyPI and Docker paths, the CLI looks for `config/` in your
+current working directory by default. Override with
+`GMAIL_CLEANUP_CONFIG_DIR=/path/to/config`.
+
 ## Quick start — local LLM
 
 You need Python 3.11+ and a local LLM server. Pick one:
