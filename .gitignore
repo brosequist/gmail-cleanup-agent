@@ -8,8 +8,7 @@ config/whitelist.txt
 # Run artifacts
 *.log
 *.log.*
-state.json
-state-applied.json
+state*.json
 out/
 
 # Python
