@@ -87,6 +87,72 @@ For each email:
 
 See [docs/privacy.md](docs/privacy.md) for the full breakdown.
 
+## Labels: how kept mail gets organized
+
+Every "keep" decision is also a **label-classification decision**. The
+LLM doesn't just decide *whether* an email survives — it picks the
+single best-matching label from a catalog you provide, and the script
+applies that label in Gmail. After a run, every kept email is filed
+under a specific category instead of sitting unsorted in your inbox.
+
+The catalog lives in
+[`config/labels.yaml`](#configlabelsyaml) and has two parts:
+
+```yaml
+existing:           # labels that already exist in your Gmail
+  - Taxes
+  - Filed
+auto_create:        # categories the agent will create the first time
+  Family:        "personal correspondence from friends or family members"
+  Receipts:      "order confirmations, purchase receipts, ..."
+  Statements:    "monthly/quarterly account statements ..."
+  Medical:       "doctors, hospitals, pharmacies, lab results, EOBs"
+  Government:    "DMV, IRS, immigration, voter, courts, social security"
+  Registrations: "event tickets, account creations, program enrollments"
+  # ...etc
+```
+
+The one-line descriptions go into the prompt as part of the catalog
+section, so the model knows what each label means without you having
+to write explicit rules for every category in
+[`config/rules.md`](#configrulesmd).
+
+A real run's outcome (per [docs/results.md](docs/results.md)):
+
+| Label | Threads kept |
+|---|---:|
+| Receipts | 21,793 |
+| Registrations | 11,640 |
+| Organizations | 3,523 |
+| School | 3,348 |
+| Family | 2,721 |
+| Medical | 1,844 |
+| Government | 1,440 |
+| Statements | 1,116 |
+| Veterans | 488 |
+| … | … |
+| **Total kept (across 18 labels)** | **53,099** |
+
+A few label-system properties worth knowing up front:
+
+- **The model is forced to pick exactly one label per kept email** —
+  no comma-separated multi-labels, no "Misc/Other" fallback.
+  [`config/rules.md`](config/rules.example.md) includes a "Don't
+  reach for a catch-all label" principle: if no specific label
+  clearly fits, prefer trash. This keeps the label set tight.
+- **Labels you don't include in the catalog won't be assigned.** The
+  model can only choose from the catalog you gave it.
+- **You can reorganize later without re-classifying.** If after a
+  run you want to add a new category — splitting `Receipts` →
+  `Receipts` + `Travel` for booked-trip records, say — the
+  [`relabel`](#reorganizing-later-the-relabel-pass) subcommand
+  re-asks the model only for the label decision, never the
+  keep-vs-trash decision. Already-kept mail stays kept.
+- **Tighten the catalog before the big run.** Each label adds tokens
+  to every batch's prompt; bloated catalogs cost real money on cloud
+  backends and slow down local runs. See the design tips in
+  [`config/labels.example.yaml`](config/labels.example.yaml).
+
 ## Quick start — local LLM
 
 You need Python 3.11+ and a local LLM server. Pick one:
