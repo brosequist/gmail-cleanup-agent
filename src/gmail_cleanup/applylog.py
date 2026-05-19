@@ -137,9 +137,9 @@ def run_apply_log(
 ) -> None:
     """Replay decisions from `log_file` to Gmail.
 
-    Behaviour mirrors the old scripts/apply_from_log.py. `audit_log`
-    receives one JSON record per replayed decision; `state_file` tracks
-    applied IDs for resume.
+    `audit_log` receives one JSON record per replayed decision;
+    `state_file` tracks applied IDs across runs so an interrupted
+    apply can resume cleanly.
     """
     mode = "APPLY (mutating Gmail)" if apply else "dry-run (no mutations)"
     logger.info("mode: %s", mode)

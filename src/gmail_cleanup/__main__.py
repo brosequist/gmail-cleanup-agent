@@ -1,4 +1,5 @@
-"""Entry point for `python -m gmail_cleanup ...`.
+"""Entry point for `python -m gmail_cleanup ...` and the
+`gmail-cleanup` console script.
 
 Before dispatching to the Click CLI, we load runtime configuration from
 `config/backend.env` (if present). This is the preferred way to set the
@@ -25,18 +26,31 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Repo root is two levels up from this file (src/gmail_cleanup/__main__.py).
+# For editable installs (`pip install -e .`) this still points at the
+# checkout. For non-editable installs the path is meaningless but
+# load_dotenv silently no-ops on missing files, so it's harmless.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-load_dotenv(_REPO_ROOT / "config" / "backend.env", override=False)
 
-# Import AFTER load_dotenv so the backend factory in cli.py sees the
-# loaded env vars when it inspects os.environ.
-from .cli import main  # noqa: E402
-from .portforward import maybe_start_pre_run  # noqa: E402
 
-# Optional: if PRE_RUN_COMMAND is configured (e.g., a kubectl
-# port-forward to reach an in-cluster Ollama / llama.cpp), launch it
-# in the background and wait for the port to open before main() runs.
-# Cleanup of the subprocess happens via an atexit hook.
-maybe_start_pre_run()
+def main():
+    """Console-script entry point used by both `python -m gmail_cleanup`
+    and the installed `gmail-cleanup` command. Loads backend.env, runs
+    the optional pre-run hook, then dispatches to the Click CLI."""
+    load_dotenv(_REPO_ROOT / "config" / "backend.env", override=False)
 
-main()
+    # Import AFTER load_dotenv so the backend factory sees the loaded env
+    # vars when it inspects os.environ.
+    from .cli import main as cli_main
+    from .portforward import maybe_start_pre_run
+
+    # Optional: if PRE_RUN_COMMAND is configured (e.g., a kubectl
+    # port-forward to reach an in-cluster Ollama / llama.cpp), launch it
+    # in the background and wait for the port to open before main()
+    # runs. Cleanup happens via an atexit hook.
+    maybe_start_pre_run()
+
+    cli_main()
+
+
+if __name__ == "__main__":
+    main()

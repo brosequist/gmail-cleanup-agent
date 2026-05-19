@@ -93,12 +93,18 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
         if e.get("has_list_unsubscribe"):
             meta_lines.append("List-Unsubscribe: yes")
         meta_str = "".join(f"{m}\n" for m in meta_lines)
+        # Body is only included when --include-body was passed to classify;
+        # otherwise the field is absent or empty, and we fall back to the
+        # snippet alone (the common path for bulk inbox-bankruptcy runs).
+        body = e.get("body") or ""
+        body_section = f"Body:\n{body}\n" if body else ""
         emails_block.append(
             f"## {i}. id: {e['id']}\n"
             f"From: {e['sender']}\n"
             f"Subject: {e['subject']}\n"
             f"{meta_str}"
             f"Snippet: {e['snippet'][:300]}\n"
+            f"{body_section}"
         )
 
     return f"""{rules_md.strip()}

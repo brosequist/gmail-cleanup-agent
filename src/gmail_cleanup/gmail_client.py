@@ -101,8 +101,14 @@ def _compute_age_days(internal_date_ms: str | int | None) -> int | None:
 
 @dataclass
 class ThreadSummary:
-    """Compact view of a thread used for classification — never includes
-    full body unless explicitly fetched separately."""
+    """Compact view of a thread used for classification.
+
+    `body` is empty by default — the classifier reads only snippet + a
+    couple of header fields. Set `include_body=True` on `search_threads`
+    (and pass `--include-body` from the CLI) to populate it from the
+    first message's text part, capped at `BODY_MAX_CHARS` to keep
+    prompts cheap.
+    """
     thread_id: str
     sender: str
     subject: str
@@ -112,6 +118,77 @@ class ThreadSummary:
     # predate these fields):
     age_days: int | None = None
     has_list_unsubscribe: bool = False
+    body: str = ""
+
+
+# Hard cap on per-email body text in the prompt. The first 4 KB of a
+# message is almost always enough to disambiguate a borderline case
+# (the snippet is ~200 chars of the same content); paying for the full
+# body of every email in a 312k-thread run would blow up token costs.
+BODY_MAX_CHARS = 4000
+
+
+def _decode_b64url(data: str) -> str:
+    """Gmail returns body parts as URL-safe base64 (no padding). Decode
+    leniently — bad bytes become U+FFFD rather than raising."""
+    import base64
+    # Restore padding (b64 requires len % 4 == 0).
+    padding = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(data + padding).decode(
+            "utf-8", errors="replace"
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _extract_body_text(payload: dict) -> str:
+    """Walk a Gmail message payload tree and return the first text/plain
+    body found (falling back to text/html → stripped of tags). Returns
+    "" if no usable text part exists (rare — common for image-only or
+    purely structural messages).
+    """
+    if not payload:
+        return ""
+
+    # Single-part messages have body.data directly on the root payload.
+    mime = payload.get("mimeType", "")
+    data = (payload.get("body") or {}).get("data")
+    if data and mime.startswith("text/plain"):
+        return _decode_b64url(data)
+
+    # Multipart — DFS, prefer text/plain over text/html.
+    html_fallback = ""
+    stack = list(payload.get("parts", []) or [])
+    while stack:
+        part = stack.pop(0)
+        sub_mime = part.get("mimeType", "")
+        sub_data = (part.get("body") or {}).get("data")
+        if sub_data:
+            if sub_mime.startswith("text/plain"):
+                return _decode_b64url(sub_data)
+            if sub_mime.startswith("text/html") and not html_fallback:
+                html_fallback = _decode_b64url(sub_data)
+        if part.get("parts"):
+            stack = list(part["parts"]) + stack
+
+    if html_fallback:
+        # Crude HTML strip — sufficient for "is this marketing" judgement,
+        # not a full sanitizer. We deliberately don't depend on BS4.
+        import re as _re
+        text = _re.sub(r"<script[^>]*>.*?</script>", " ",
+                       html_fallback, flags=_re.DOTALL | _re.IGNORECASE)
+        text = _re.sub(r"<style[^>]*>.*?</style>", " ", text,
+                       flags=_re.DOTALL | _re.IGNORECASE)
+        text = _re.sub(r"<[^>]+>", " ", text)
+        text = _re.sub(r"\s+", " ", text).strip()
+        return text
+
+    # Root payload itself had data but mime wasn't text/plain — try it
+    # anyway (some non-standard senders).
+    if data:
+        return _decode_b64url(data)
+    return ""
 
 
 class GmailClient:
@@ -203,7 +280,7 @@ class GmailClient:
 
     def search_threads(
         self, query: str, page_size: int = 100, max_threads: int | None = None,
-        skip_ids: set[str] | None = None,
+        skip_ids: set[str] | None = None, include_body: bool = False,
     ) -> Iterator[ThreadSummary]:
         """Yield ThreadSummary objects matching the query. Handles
         pagination transparently. Reads only the first message of each
@@ -215,6 +292,11 @@ class GmailClient:
         caller can resume-skip them without paying for a per-thread
         `messages.get` round-trip. Critical for runs with large
         state.json on resume.
+
+        If `include_body=True`, each fetched thread also pulls the first
+        message's body (text/plain preferred, text/html fallback) and
+        truncates it to BODY_MAX_CHARS. Doubles or triples the per-
+        message API payload — use sparingly.
         """
         page_token: str | None = None
         yielded = 0
@@ -239,15 +321,17 @@ class GmailClient:
                     if max_threads and yielded >= max_threads:
                         return
                     continue
-                # Fetch first message metadata (cheaper than full thread)
-                def _get_meta(tid=tid):
-                    return self.service.users().messages().get(
-                        userId="me",
-                        id=tid,
-                        format="metadata",
-                        metadataHeaders=["From", "Subject", "Date",
-                                         "List-Unsubscribe"],
-                    ).execute()
+                # Fetch first message metadata (cheaper than full thread).
+                # `format=full` is required to get body parts; metadata-only
+                # is enough when --include-body is off.
+                fmt = "full" if include_body else "metadata"
+                def _get_meta(tid=tid, fmt=fmt):
+                    kwargs = {"userId": "me", "id": tid, "format": fmt}
+                    if fmt == "metadata":
+                        kwargs["metadataHeaders"] = [
+                            "From", "Subject", "Date", "List-Unsubscribe",
+                        ]
+                    return self.service.users().messages().get(**kwargs).execute()
                 try:
                     meta = _retry_gmail(_get_meta, on_rebuild=self._rebuild_service)
                 except HttpError as e:
@@ -273,6 +357,9 @@ class GmailClient:
                         continue
                     raise
                 hdrs = {h["name"]: h["value"] for h in meta.get("payload", {}).get("headers", [])}
+                body = ""
+                if include_body:
+                    body = _extract_body_text(meta.get("payload", {}))[:BODY_MAX_CHARS]
                 yield ThreadSummary(
                     thread_id=tid,
                     sender=hdrs.get("From", ""),
@@ -281,6 +368,7 @@ class GmailClient:
                     date=hdrs.get("Date", ""),
                     age_days=_compute_age_days(meta.get("internalDate")),
                     has_list_unsubscribe=bool(hdrs.get("List-Unsubscribe")),
+                    body=body,
                 )
                 yielded += 1
                 if max_threads and yielded >= max_threads:

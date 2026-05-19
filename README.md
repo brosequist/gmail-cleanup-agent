@@ -172,13 +172,17 @@ ollama serve &   # or run `ollama` as a system service
 git clone https://github.com/brosequist/gmail-cleanup-agent
 cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 
 # 4. Configure — copy the template and uncomment the Ollama section
 cp config/backend.env.example config/backend.env
 # edit config/backend.env: uncomment GCA_BACKEND / OLLAMA_HOST / OLLAMA_MODEL
 # (you can leave the other backend sections commented out)
 ```
+
+`pip install -e .` registers a `gmail-cleanup` console script and
+makes `python -m gmail_cleanup ...` work from any directory. The two
+are interchangeable in the rest of this README.
 
 `config/backend.env` is loaded automatically every time you run
 `python -m gmail_cleanup ...`. Shell-exported env vars still override
@@ -194,12 +198,12 @@ work without editing the file.
 #    then start its local server (Developer tab → Start Server).
 #    Default URL: http://localhost:1234
 
-# 2. Install this tool (same as above)
+# 2. Install this tool (same as above), with the openai extra
 git clone https://github.com/brosequist/gmail-cleanup-agent
 cd gmail-cleanup-agent
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt openai     # +openai SDK for the
-                                            # OpenAI-compatible client
+pip install -e '.[openai]'    # base deps + openai SDK for the
+                              # OpenAI-compatible client
 
 # 3. Configure — LM Studio speaks the OpenAI wire format
 cp config/backend.env.example config/backend.env
@@ -233,9 +237,9 @@ ritual before every run.
 
 ```bash
 # Install the SDK for whichever provider you're using
-pip install -r requirements.txt anthropic    # for Claude
+pip install -e '.[claude]'    # for Claude
 # or
-pip install -r requirements.txt openai       # for real OpenAI
+pip install -e '.[openai]'    # for real OpenAI
 
 # Configure via the env file
 cp config/backend.env.example config/backend.env
@@ -275,8 +279,9 @@ python -m gmail_cleanup classify \
   --apply
 ```
 
-The bundled `scripts/run-cleanup.sh` wraps this with sensible
-defaults and a tee'd log.
+For a tee'd console log alongside the per-decision JSONL, pass
+`--console-log dry-run.console.log` (handy for long runs you want
+to inspect after the fact).
 
 Every subcommand has built-in help — `python -m gmail_cleanup
 --help` lists subcommands, and `python -m gmail_cleanup <subcommand>
@@ -286,6 +291,23 @@ Every subcommand has built-in help — `python -m gmail_cleanup
 python -m gmail_cleanup --help          # auth | classify | apply-log | relabel
 python -m gmail_cleanup classify --help # --query, --apply, --dry-run, --concurrency, ...
 ```
+
+### Recovering from a transient backend failure: `--retry-errors`
+
+If a Ollama / llama.cpp / OpenAI hiccup mass-errored a batch of
+threads, you'll see `action: "error"` rows in `dry-run.log`. Re-run
+classify with `--retry-errors` to re-classify only those threads
+(the resume set is the union of non-errored IDs):
+
+```bash
+python -m gmail_cleanup classify \
+  --query "older_than:90d -has:userlabels" \
+  --retry-errors --dry-run
+```
+
+The 312k-thread reference run finished with **0 final errors** after
+a single retry pass over 809 errored threads — see
+[docs/results.md](docs/results.md#retry-pass).
 
 ## Applying decisions from a dry-run: the `apply-log` pass
 
@@ -456,9 +478,12 @@ strong JSON-output discipline should be fine.
 
 ```
 gmail_cleanup/
-├── cli.py              entry point + command parsing + orchestration
+├── __main__.py         dotenv + pre-run hook + dispatch to cli.main
+├── cli.py              Click subcommands (auth, classify, relabel, apply-log)
 ├── gmail_client.py     thin wrapper over googleapiclient with retry
 ├── prompt.py           builds the LLM prompt from rules.md + labels.yaml
+├── applylog.py         apply-log subcommand (Gmail batch HTTP, 429 retry)
+├── portforward.py      optional PRE_RUN_COMMAND hook (kubectl / SSH tunnel)
 └── backends/
     ├── ollama.py       local Ollama server (HTTP JSON-mode)
     ├── openai.py       OpenAI-compatible (LM Studio, llama.cpp, real OpenAI)

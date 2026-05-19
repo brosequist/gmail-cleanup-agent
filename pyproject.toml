@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmail-cleanup-agent"
+version = "0.1.0"
+description = "Triage a Gmail inbox with a local or cloud LLM"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Brett Rosequist" }]
+dependencies = [
+    "google-api-python-client>=2.140.0",
+    "google-auth>=2.34.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.2",
+    "click>=8.1.7",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40.0"]
+openai = ["openai>=1.55.0"]
+
+[project.scripts]
+gmail-cleanup = "gmail_cleanup.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

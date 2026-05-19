@@ -142,9 +142,38 @@ def auth():
          "from the resume-skip set before processing. Use after a transient "
          "backend failure mass-errored a batch.",
 )
+@click.option(
+    "--include-body/--no-include-body",
+    default=False,
+    show_default=True,
+    help="Fetch and include the first message's body (text/plain, fall back to "
+         "text/html stripped) in the prompt, capped at 4 KB per email. Off by "
+         "default — snippet + headers are enough for bulk triage. Use for "
+         "higher-stakes runs where the snippet is ambiguous. Roughly 2-3x the "
+         "Gmail API payload size and ~+30% prompt tokens per email.",
+)
+@click.option(
+    "--console-log",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Mirror logger output to this file in addition to stderr. Useful "
+         "for long-running cleanup passes you want to grep / tail later.",
+)
 def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
-             state_file, log_file, concurrency, retry_errors):
+             state_file, log_file, concurrency, retry_errors, include_body,
+             console_log):
     """Classify and (optionally) act on threads matching `query`."""
+
+    if console_log:
+        # Add a FileHandler to the root logger so every logger.* call
+        # in the run also lands in the file. Append mode — multiple
+        # session resumes accumulate into the same file, matching the
+        # log-file behavior elsewhere in this command.
+        fh = logging.FileHandler(console_log, mode="a")
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(fh)
+        logger.info("mirroring console output to %s", console_log)
 
     if log_file is None:
         log_file = REPO_ROOT / ("applied.log" if apply else "dry-run.log")
@@ -300,7 +329,9 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
             batch_buffer.clear()
             maybe_confirm()
 
-        for t in client.search_threads(query, max_threads=limit, skip_ids=processed):
+        for t in client.search_threads(query, max_threads=limit,
+                                        skip_ids=processed,
+                                        include_body=include_body):
             if t.thread_id in processed:
                 counters["skipped_resume"] += 1
                 continue
@@ -662,6 +693,7 @@ def _classify_pure(
                 "subject": t.subject, "snippet": t.snippet,
                 "age_days": t.age_days,
                 "has_list_unsubscribe": t.has_list_unsubscribe,
+                "body": t.body,
             })
 
     decisions: list[dict] = []

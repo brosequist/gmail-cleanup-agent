@@ -63,7 +63,7 @@
     "concurrency_workers": 4
   },
   "apply_phase_run": true,
-  "apply_method": "scripts/apply_from_log.py (replay from dry-run.log, no LLM)",
+  "apply_method": "python -m gmail_cleanup apply-log --apply (replay from dry-run.log, no LLM)",
   "apply_wallclock_hours_estimate": 28,
   "post_apply_audit": {
     "kept_threads_audited": 53099,

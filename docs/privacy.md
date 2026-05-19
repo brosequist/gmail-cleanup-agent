@@ -13,16 +13,23 @@ For each email, only:
 - **Subject** line
 - **Snippet** — the ~200-char preview Gmail returns by default
   (capped at 300 chars by the prompt builder as a defensive measure)
-
-The **Date** the email was received is fetched alongside the metadata
-and recorded in the local decision log, but it is NOT sent to the
-LLM. Keeping the prompt date-free saves tokens and makes the
-classifier age-agnostic.
+- **Age** in days — derived from Gmail's `internalDate` and rendered
+  as `Age: N days`. The raw timestamp is **not** sent; only the
+  derived day count. Lets the classifier apply different heuristics
+  for "received last week" vs "received 5 years ago" (especially
+  useful for inbox-bankruptcy on years-old mail where time-sensitive
+  notices are no longer actionable).
+- **`List-Unsubscribe: yes`** — a single boolean flag indicating
+  presence of the RFC 2369 header. The header *value* (which can
+  contain mailto: links or one-click URLs) is **not** sent.
 
 The **full message body is NOT sent** unless you explicitly pass
-`--include-body`, which we do not recommend for the bulk-classification
-case (the snippet is enough for the kind of marketing-vs-personal call
-this tool is making).
+`--include-body`. When set, the classifier fetches the first
+message's `text/plain` part (falling back to `text/html` with tags
+stripped) and includes up to 4 KB per email in the prompt. Off by
+default — snippet alone is enough for the marketing-vs-personal
+call this tool is making, and `--include-body` roughly triples
+per-email prompt size on cloud backends.
 
 Threads are processed independently — no conversation history is sent
 across calls.
@@ -79,9 +86,14 @@ The tool writes the following files in the repo's working directory:
 | `config/labels.yaml` | Your label catalog | no |
 | `config/rules.md` | Your classification rules | no |
 | `config/whitelist.txt` | Sender addresses to never trash | varies |
-| `state.json` | Resume checkpoint (last batch processed) | no |
+| `state.json` | Classify resume checkpoint (processed thread IDs) | no |
+| `state-applied.json` | `apply-log` resume checkpoint (applied thread IDs) | no |
+| `relabel-state.json` | `relabel` resume checkpoint | no |
 | `dry-run.log` | Per-email decisions from a `--dry-run` pass | yes — contains subjects + senders |
 | `applied.log` | Per-email actions actually taken | yes |
+| `replay-preview.log` | Output of `apply-log --dry-run` | yes |
+| `relabel.log` | Output of `relabel` | yes |
+| `config/backend.env` | Backend selection + API keys for cloud providers | yes — keep out of git |
 
 The `.gitignore` excludes the sensitive ones from accidental commits.
 **Never commit `credentials.json` or `token.json`** — both grant access
