@@ -24,9 +24,22 @@ dependencies = [
 [project.optional-dependencies]
 claude = ["anthropic>=0.40.0"]
 openai = ["openai>=1.55.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
 
 [project.scripts]
 gmail-cleanup = "gmail_cleanup.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    # google-auth-oauthlib emits a DeprecationWarning on 3.12+ for some
+    # internal datetime usage; not actionable from our side.
+    "ignore::DeprecationWarning:google.*",
+]

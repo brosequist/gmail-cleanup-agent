@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (editable + dev + all backend extras)
+        run: |
+          python -m pip install --upgrade pip
+          # All extras so backend tests don't auto-skip in CI.
+          pip install -e '.[dev,openai,claude]'
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Verify CLI entry points
+        # Belt-and-suspenders smoke test: catch a packaging regression
+        # where the module loads but the console-script is broken.
+        run: |
+          python -m gmail_cleanup --help
+          gmail-cleanup --help
