@@ -31,5 +31,12 @@ load_dotenv(_REPO_ROOT / "config" / "backend.env", override=False)
 # Import AFTER load_dotenv so the backend factory in cli.py sees the
 # loaded env vars when it inspects os.environ.
 from .cli import main  # noqa: E402
+from .portforward import maybe_start_pre_run  # noqa: E402
+
+# Optional: if PRE_RUN_COMMAND is configured (e.g., a kubectl
+# port-forward to reach an in-cluster Ollama / llama.cpp), launch it
+# in the background and wait for the port to open before main() runs.
+# Cleanup of the subprocess happens via an atexit hook.
+maybe_start_pre_run()
 
 main()

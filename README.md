@@ -222,6 +222,13 @@ typically *slows things down*. See
 [docs/llama-server-setup.md](docs/llama-server-setup.md) for the
 full set of gotchas.
 
+If your backend runs in **Kubernetes** or behind an **SSH tunnel**,
+the CLI can launch the port-forward / tunnel command for you and
+clean it up on exit — see the `PRE_RUN_COMMAND` block in
+[`config/backend.env.example`](config/backend.env.example). Useful
+to avoid the `kubectl port-forward -n ollama svc/ollama 11434:11434 &`
+ritual before every run.
+
 ## Quick start — cloud LLM (faster, costs money)
 
 ```bash
