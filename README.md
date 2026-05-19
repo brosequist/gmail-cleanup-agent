@@ -142,6 +142,15 @@ The same `GCA_BACKEND=openai` setup also works with llama.cpp's
 `server` binary, vLLM, and Ollama's `/v1` OpenAI shim — point
 `OPENAI_BASE_URL` accordingly.
 
+If you're using **llama.cpp's `llama-server`**, there are a few
+sharp edges worth knowing about — sampling configs that work great
+for chat actively break verbatim-reproduction tasks like this one,
+reasoning models (Qwen3, DeepSeek-R1, ...) need
+`OPENAI_DISABLE_THINKING=1`, and `--parallel N` on a single GPU
+typically *slows things down*. See
+[docs/llama-server-setup.md](docs/llama-server-setup.md) for the
+full set of gotchas.
+
 ## Quick start — cloud LLM (faster, costs money)
 
 ```bash

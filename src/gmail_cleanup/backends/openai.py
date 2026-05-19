@@ -20,6 +20,17 @@ Selected via GCA_BACKEND=openai. Configure via env:
   OPENAI_JSON_MODE    default "1" — sends `response_format: json_object`.
                       Set to "0" if your local server doesn't support it
                       (older llama.cpp builds, some vLLM configs).
+  OPENAI_DISABLE_THINKING default "0" — set to "1" when running against a
+                      reasoning / thinking model (Qwen3, DeepSeek-R1, ...)
+                      on llama.cpp. Adds
+                      `extra_body.chat_template_kwargs.enable_thinking=false`
+                      to each request so the model emits its answer directly
+                      in `content` instead of burning the entire token
+                      budget on `reasoning_content` chain-of-thought.
+                      Real OpenAI ignores unknown extras; some other
+                      OpenAI-compatible servers (vLLM, older LM Studio
+                      builds) may reject them.
+                      See docs/llama-server-setup.md for details.
   OPENAI_RETRIES      default 5 — retry transient connection / rate-limit
                       errors with exponential backoff (1, 2, 4, 8, 16 s).
 """
@@ -78,6 +89,21 @@ class OpenAIBackend:
         )
         if self.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+
+        # Reasoning/thinking-mode models (Qwen3, DeepSeek-R1, etc.) on
+        # llama.cpp servers split output between `reasoning_content`
+        # (chain-of-thought) and `content` (final answer). When the model
+        # spends its entire token budget on reasoning, `content` is empty
+        # and the classifier sees "0 decisions returned." Send
+        # `chat_template_kwargs.enable_thinking=false` as an OpenAI-API
+        # extra body parameter to force the model straight to the answer.
+        # Opt-in via env (default off) — real OpenAI ignores unknown
+        # extras, but some other OpenAI-compatible servers (vLLM,
+        # LM Studio older builds) may reject them.
+        if os.environ.get("OPENAI_DISABLE_THINKING", "0") in ("1", "true", "yes"):
+            kwargs["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
 
         last_exc: Exception | None = None
         for attempt in range(self.retries + 1):
