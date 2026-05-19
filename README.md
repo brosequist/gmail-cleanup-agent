@@ -278,6 +278,53 @@ python -m gmail_cleanup classify \
 The bundled `scripts/run-cleanup.sh` wraps this with sensible
 defaults and a tee'd log.
 
+Every subcommand has built-in help — `python -m gmail_cleanup
+--help` lists subcommands, and `python -m gmail_cleanup <subcommand>
+--help` shows all options for that subcommand:
+
+```bash
+python -m gmail_cleanup --help          # auth | classify | apply-log | relabel
+python -m gmail_cleanup classify --help # --query, --apply, --dry-run, --concurrency, ...
+```
+
+## Applying decisions from a dry-run: the `apply-log` pass
+
+After a dry-run produces `dry-run.log`, you can replay its decisions
+to Gmail without re-running the LLM. Useful when:
+
+- You want to audit `dry-run.log` first, then commit the result
+  later (or on a different machine) — no need to keep the GPU around.
+- Your apply session got interrupted; `state-applied.json`
+  remembers what's done and the next invocation picks up where it
+  left off.
+- You re-ran classify on the same threads, the rules improved, and
+  you want to apply only the *latest* decision per thread.
+
+```bash
+# Preview what apply-log will do without touching Gmail
+python -m gmail_cleanup apply-log --dry-run
+
+# Actually apply (mutates Gmail; resumable via state-applied.json)
+python -m gmail_cleanup apply-log --apply
+
+# See every option
+python -m gmail_cleanup apply-log --help
+```
+
+Key properties:
+
+- **No LLM call.** It just reads the JSONL log and translates each
+  row into a Gmail batch HTTP request — trash for `action: "trash"`,
+  `threads.modify(addLabelIds=...)` for `action: "keep"` + label.
+- **Latest decision wins.** Multiple log lines with the same thread
+  id collapse to the most recent one. Re-running classify and then
+  apply-log is safe.
+- **Resumable** via `state-applied.json` — successful IDs are
+  checkpointed after every batch.
+- **Robust to 429s** — Gmail's per-user concurrent ceiling
+  (~3.3 ops/sec) is hit easily; the subcommand retries 429ed
+  requests with exponential backoff within each batch.
+
 ## Reorganizing later: the `relabel` pass
 
 After a big classification run you'll often want to *add* label

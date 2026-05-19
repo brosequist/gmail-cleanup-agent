@@ -92,11 +92,11 @@ didn't end up writing a batch-duration log line.
 ## Apply pass
 
 After the dry-run was validated, the decisions were applied to Gmail
-via `scripts/apply_from_log.py --apply`. The script reads the
-existing `dry-run.log`, takes the latest decision per thread ID,
-and replays each via the Gmail batch HTTP API — no LLM calls, no
-re-classification. Resumable via `state-applied.json` and audited
-in `applied.log`.
+via `python -m gmail_cleanup apply-log --apply`. The subcommand
+reads the existing `dry-run.log`, takes the latest decision per
+thread ID, and replays each via the Gmail batch HTTP API — no LLM
+calls, no re-classification. Resumable via `state-applied.json`
+and audited in `applied.log`.
 
 - **Wall-clock:** ~28 hours at ~3.1 ops/sec (Gmail's per-user
   processing ceiling on a single account, not a client-side limit)
@@ -152,7 +152,7 @@ The procedure:
 4. Run `classify --dry-run` (it'll be much shorter — ~12 hrs at the
    measured throughput).
 5. Audit the new dry-run.log diff against the first pass, then
-   `apply_from_log.py --apply` the deltas.
+   `python -m gmail_cleanup apply-log --apply` the deltas.
 
 Most "kept" threads are correctly kept; the follow-on flips only the
 ~1,800-ish items per the categories above. The iterative-refinement

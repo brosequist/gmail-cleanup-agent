@@ -20,6 +20,7 @@ from pathlib import Path
 
 import click
 
+from . import applylog
 from .gmail_client import GmailClient, ThreadSummary
 from .prompt import (
     LabelCatalog,
@@ -779,6 +780,64 @@ def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str):
 
 def _checkpoint(state_file: Path, processed: set[str]) -> None:
     state_file.write_text(json.dumps({"processed": sorted(processed)}))
+
+
+@cli.command(name="apply-log", context_settings={"max_content_width": 100})
+@click.option(
+    "--log-file", type=click.Path(exists=True, path_type=Path),
+    default=REPO_ROOT / "dry-run.log", show_default=True,
+    help="Source of decisions to replay (typically dry-run.log).",
+)
+@click.option(
+    "--state-file", type=click.Path(path_type=Path),
+    default=REPO_ROOT / "state-applied.json", show_default=True,
+    help="Tracks applied IDs across runs for resume.",
+)
+@click.option(
+    "--apply/--dry-run", default=False, show_default=True,
+    help="--apply actually mutates Gmail. Default is dry-run preview.",
+)
+@click.option(
+    "--limit", type=int, default=None,
+    help="Apply at most this many actions (for staged rollout).",
+)
+@click.option(
+    "--batch-size", type=int, default=applylog.BATCH_SIZE, show_default=True,
+    help="Sub-requests per batch HTTP call. Higher = faster but more 429s "
+         "(Gmail's per-user concurrent limit is ~20).",
+)
+@click.option(
+    "--batch-sleep", type=float, default=1.5, show_default=True,
+    help="Sleep between batches (seconds). Keeps us under Gmail's 250 QU/s/user quota.",
+)
+@click.option(
+    "--credentials", type=click.Path(exists=True, path_type=Path),
+    default=CONFIG_DIR / "credentials.json", show_default=True,
+)
+@click.option(
+    "--token", type=click.Path(path_type=Path),
+    default=CONFIG_DIR / "token.json", show_default=True,
+)
+@click.option(
+    "--audit-log", type=click.Path(path_type=Path), default=None,
+    help="Override default audit log (applied.log in --apply mode, "
+         "replay-preview.log otherwise).",
+)
+def apply_log(log_file, state_file, apply, limit, batch_size, batch_sleep,
+              credentials, token, audit_log):
+    """Replay decisions from a dry-run.log to Gmail without re-classifying.
+
+    Reads the log, keeps the latest decision per thread, and replays each
+    via Gmail's batch HTTP API. Resumable: applied IDs are checkpointed
+    to --state-file after every batch.
+    """
+    if audit_log is None:
+        audit_log = REPO_ROOT / ("applied.log" if apply else "replay-preview.log")
+    applylog.run_apply_log(
+        log_file=log_file, state_file=state_file, apply=apply,
+        limit=limit, batch_size=batch_size, batch_sleep=batch_sleep,
+        credentials=credentials, token=token, audit_log=audit_log,
+    )
 
 
 def main():
