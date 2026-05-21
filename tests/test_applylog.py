@@ -2,7 +2,9 @@
 
 Covers:
   - load_latest_decisions: latest-per-id, skip headers, skip malformed
-  - _execute_with_retry:  success / 429-retry / non-retryable error paths
+  - _keep_label_names:    category + reviewed_label resolution
+  - _execute_with_retry:  success / 429-retry / non-retryable error paths,
+                          reviewed_label applied alongside the category label
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import pytest
 from gmail_cleanup.applylog import (
     MAX_429_RETRIES,
     _execute_with_retry,
+    _keep_label_names,
     load_latest_decisions,
 )
 
@@ -46,6 +49,34 @@ def test_load_latest_decisions_empty_file(tmp_path: Path):
     log = tmp_path / "empty.log"
     log.write_text("")
     assert load_latest_decisions(log) == {}
+
+
+# ---------------- _keep_label_names ----------------
+
+
+def test_keep_label_names_category_and_reviewed():
+    assert _keep_label_names(
+        {"label": "Receipts", "reviewed_label": "Reviewed"}
+    ) == ["Receipts", "Reviewed"]
+
+
+def test_keep_label_names_reviewed_only():
+    assert _keep_label_names(
+        {"label": None, "reviewed_label": "Reviewed"}) == ["Reviewed"]
+
+
+def test_keep_label_names_category_only():
+    assert _keep_label_names({"label": "Receipts"}) == ["Receipts"]
+
+
+def test_keep_label_names_neither():
+    assert _keep_label_names({"label": None}) == []
+
+
+def test_keep_label_names_dedups_when_equal():
+    # If category label and reviewed label coincide, don't add it twice.
+    assert _keep_label_names(
+        {"label": "Reviewed", "reviewed_label": "Reviewed"}) == ["Reviewed"]
 
 
 # ---------------- _execute_with_retry ----------------
@@ -123,6 +154,32 @@ def test_execute_with_retry_all_succeed(tmp_path: Path):
     assert counters == Counter(trash=1, keep_labeled=1)
     assert svc.trashed == ["t1"]
     assert svc.modified == [("k1", {"addLabelIds": ["Label_1"]})]
+
+
+def test_execute_with_retry_applies_reviewed_label(tmp_path: Path):
+    """A keep row carrying reviewed_label applies BOTH the category label
+    and the reviewed label in one modify call, category-first."""
+    items = [{"id": "k1", "action": "keep", "label": "Receipts",
+              "reviewed_label": "Reviewed"}]
+    label_ids = {"Receipts": "Label_1", "Reviewed": "Label_9"}
+    counters: Counter[str] = Counter()
+    audit_path = tmp_path / "audit.log"
+    audit = audit_path.open("w")
+    decisions_by_id = {d["id"]: d for d in items}
+    bx = _BatchExec([{"k1": (None, None)}])
+    svc = _FakeService(bx)
+
+    successful = _execute_with_retry(
+        svc, items, label_ids, audit, counters, decisions_by_id, batch_idx=1,
+    )
+    audit.close()
+
+    assert successful == {"k1"}
+    assert counters == Counter(keep_labeled=1)
+    assert svc.modified == [("k1", {"addLabelIds": ["Label_1", "Label_9"]})]
+    rec = json.loads(audit_path.read_text().strip())
+    assert rec["result"] == "keep_labeled"
+    assert rec["reviewed_label"] == "Reviewed"
 
 
 def test_execute_with_retry_429_then_succeed(tmp_path: Path, monkeypatch):

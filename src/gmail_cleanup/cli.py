@@ -190,9 +190,34 @@ def auth():
     help="Mirror logger output to this file in addition to stderr. Useful "
          "for long-running cleanup passes you want to grep / tail later.",
 )
+@click.option(
+    "--reviewed-label",
+    metavar="[NAME]",
+    is_flag=False,
+    flag_value="Reviewed",
+    default=None,
+    help="Apply a label to every email the LLM keeps — including whitelisted "
+         "senders — regardless of which category label it got. Trashed and "
+         "errored emails are NOT labeled. The label name is also excluded "
+         "from this and future runs, so a re-run never re-reviews mail the "
+         "tool already finished. Pass bare (--reviewed-label) for the default "
+         "name \"Reviewed\", or --reviewed-label=NAME for a custom name. "
+         "Off when omitted.",
+)
+@click.option(
+    "--skip-label",
+    "skip_labels",
+    metavar="NAME",
+    multiple=True,
+    help="Exclude emails carrying label NAME from classification (server-side "
+         "Gmail query filter — excluded mail is never even listed). "
+         "Repeatable: pass it several times to skip several labels. The "
+         "--reviewed-label name is skipped automatically; use this for "
+         "additional, often manually-applied labels. Off when omitted.",
+)
 def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
              state_file, log_file, concurrency, retry_errors, include_body,
-             console_log):
+             console_log, reviewed_label, skip_labels):
     """Classify and (optionally) act on threads matching `query`."""
 
     if console_log:
@@ -213,6 +238,36 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
     if log_file is None:
         log_file = work / ("applied.log" if apply else "dry-run.log")
 
+    # --reviewed-label / --skip-label — both opt-in, unset by default.
+    # The reviewed-label name (default "Reviewed" when the flag is given
+    # bare) is always added to the skip set, so a re-run never re-reviews
+    # mail this tool already finished. --skip-label adds further labels to
+    # exclude — handy for protecting manually-applied "do not touch"
+    # labels. Skipping is a server-side Gmail query filter (`-label:"…"`),
+    # so excluded mail is never even listed: no metadata fetch, no LLM call.
+    #
+    # A label name with a `"` in it cannot be expressed as a Gmail query
+    # term (the term itself is `"`-delimited and Gmail search has no escape
+    # for an inner quote). Such a name is dropped from the skip filter with
+    # a warning rather than emitted as a malformed query — the label can
+    # still be applied normally; only the skip optimisation is lost.
+    requested_skip: list[str] = []
+    for name in list(skip_labels) + ([reviewed_label] if reviewed_label else []):
+        if name and name not in requested_skip:
+            requested_skip.append(name)
+    skip_names: list[str] = []
+    for name in requested_skip:
+        if '"' in name:
+            logger.warning(
+                "label %r contains a double-quote — Gmail search cannot "
+                "express it as a query term, so it will NOT be skip-filtered "
+                "(the label is still applied normally if it is the "
+                "reviewed-label).", name)
+            continue
+        skip_names.append(name)
+        if f'label:"{name}"' not in query:
+            query = f'{query} -label:"{name}"'.strip()
+
     catalog = LabelCatalog.load(cfg / "labels.yaml")
     whitelist = load_whitelist(cfg / "whitelist.txt")
     rules = (cfg / "rules.md").read_text()
@@ -222,6 +277,21 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
                 len(catalog.existing), len(catalog.auto_create))
     logger.info("whitelist: %d entries", len(whitelist))
     logger.info("query: %s", query)
+    if reviewed_label:
+        logger.info("reviewed-label: %r (applied to kept + whitelisted emails)",
+                    reviewed_label)
+        if reviewed_label.lower() in {lbl.lower()
+                                      for lbl in catalog.all_keep_labels}:
+            logger.warning(
+                "reviewed-label %r is also a category label in labels.yaml — "
+                "every email filed under that category will be excluded from "
+                "future classify runs by the skip filter. Use a distinct name "
+                "if that is not what you intend.",
+                reviewed_label,
+            )
+    if skip_names:
+        logger.info("skip-labels (excluded from classification): %s",
+                    ", ".join(skip_names))
     logger.info("mode: %s", "APPLY (will modify Gmail)" if apply else "dry-run")
 
     client = _client()
@@ -239,6 +309,29 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
         missing = [n for n in catalog.auto_create if n not in label_ids]
         if missing:
             logger.info("--dry-run: would create labels: %s", ", ".join(missing))
+
+    # Resolve the reviewed-label against existing Gmail labels
+    # case-insensitively: if the account already has a label that differs
+    # only in casing (e.g. user typed "reviewed", label "Reviewed" exists),
+    # reuse the existing label instead of creating a near-duplicate.
+    if reviewed_label and reviewed_label not in label_ids:
+        ci_match = next((name for name in label_ids
+                         if name.lower() == reviewed_label.lower()), None)
+        if ci_match:
+            logger.info("reviewed-label %r matches existing Gmail label %r "
+                        "(case-insensitive) — using the existing label",
+                        reviewed_label, ci_match)
+            reviewed_label = ci_match
+
+    # The reviewed-label needs to exist before we can apply it. Skip-only
+    # labels are pure query filters and don't need to exist (a `-label:`
+    # term for a nonexistent label simply matches nothing).
+    if reviewed_label and reviewed_label not in label_ids:
+        if apply:
+            logger.info("creating reviewed-label %r", reviewed_label)
+            label_ids[reviewed_label] = client.create_label(reviewed_label)
+        else:
+            logger.info("--dry-run: would create reviewed-label %r", reviewed_label)
 
     # Resume state — track processed thread IDs to skip on resume
     processed: set[str] = set()
@@ -356,7 +449,8 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
                 threads, decisions, whitelisted = results[i]
                 _apply_decisions(threads, decisions, whitelisted, label_ids,
                                  client, apply, log_fh, log_lock,
-                                 counters, counters_lock)
+                                 counters, counters_lock,
+                                 reviewed_label=reviewed_label)
                 processed.update(t.thread_id for t in b)
                 actions_since_confirm += len(b)
             _checkpoint(state_file, processed)
@@ -785,16 +879,47 @@ def _apply_decisions(
     batch: list[ThreadSummary], decisions: list[dict],
     whitelisted: list[ThreadSummary], label_ids: dict[str, str], client,
     apply: bool, log_fh, log_lock, counters: dict, counters_lock,
+    reviewed_label: str | None = None,
 ) -> None:
     """Apply (or just log) decisions for one batch. Runs on the main
     thread — Gmail client isn't thread-safe and we want stable log
-    ordering."""
-    # Whitelisted threads — emit KEEP-no-label decision; no Gmail mutation.
+    ordering.
+
+    When `reviewed_label` is set, every KEPT email — LLM-kept and
+    whitelisted alike — also receives that label, on top of any category
+    label, so future runs can filter it out. Trashed and errored emails
+    are never given the reviewed label.
+
+    In `--apply` mode the decision is logged only AFTER the Gmail
+    mutation is attempted. If the trash/label call raises, the whole
+    record is logged as `action: "error"` (and counted as an error, not
+    a keep/trash) so the log never claims a mutation that did not land,
+    and `--retry-errors` can pick the thread up on a later run."""
+    reviewed_id = label_ids.get(reviewed_label) if reviewed_label else None
+
+    # Whitelisted threads — emit KEEP-no-label decision. The only possible
+    # Gmail mutation is the optional reviewed-label.
     for t in whitelisted:
-        with counters_lock:
-            counters["whitelist"] += 1
-        with log_lock:
-            _log(log_fh, t, "keep", None, "whitelist")
+        err: str | None = None
+        if apply and reviewed_id:
+            try:
+                client.modify_thread_labels(t.thread_id,
+                                            add_label_ids=[reviewed_id])
+            except Exception as e:
+                err = str(e)
+                logger.error("reviewed-label failed for %s: %s", t.thread_id, e)
+        if err is not None:
+            with counters_lock:
+                counters["errors"] += 1
+            with log_lock:
+                _log(log_fh, t, "error", None,
+                     f"reviewed-label apply failed: {err[:200]}")
+        else:
+            with counters_lock:
+                counters["whitelist"] += 1
+            with log_lock:
+                _log(log_fh, t, "keep", None, "whitelist",
+                     reviewed_label=reviewed_label)
 
     by_id = {t.thread_id: t for t in batch}
     for d in decisions:
@@ -809,35 +934,63 @@ def _apply_decisions(
                 _log(log_fh, t, "error", None, f"backend: {d.get('_err','')[:200]}")
             continue
         if action == "trash":
-            with counters_lock:
-                counters["trash"] += 1
-            with log_lock:
-                _log(log_fh, t, "trash", None, "" if not apply else "applied")
+            err = None
             if apply:
                 try:
                     client.trash_thread(t.thread_id)
                 except Exception as e:
+                    err = str(e)
                     logger.error("trash failed for %s: %s", t.thread_id, e)
-                    with counters_lock:
-                        counters["errors"] += 1
+            if err is not None:
+                with counters_lock:
+                    counters["errors"] += 1
+                with log_lock:
+                    _log(log_fh, t, "error", None, f"trash failed: {err[:200]}")
+            else:
+                with counters_lock:
+                    counters["trash"] += 1
+                with log_lock:
+                    _log(log_fh, t, "trash", None,
+                         "" if not apply else "applied")
         else:  # keep
             label = d.get("label")
-            with counters_lock:
-                counters["keep"] += 1
-            with log_lock:
-                _log(log_fh, t, "keep", label, "" if not apply else "applied")
-            if apply and label:
-                lid = label_ids.get(label)
-                if lid:
+            err = None
+            if apply:
+                # Add the category label (if any) and the reviewed-label
+                # (if enabled) in a single threads.modify call.
+                add_ids: list[str] = []
+                if label:
+                    lid = label_ids.get(label)
+                    if lid:
+                        add_ids.append(lid)
+                    else:
+                        logger.warning("label %r has no Gmail id; skipping", label)
+                if reviewed_id:
+                    add_ids.append(reviewed_id)
+                if add_ids:
                     try:
-                        client.add_label_to_thread(t.thread_id, lid)
+                        client.modify_thread_labels(t.thread_id,
+                                                    add_label_ids=add_ids)
                     except Exception as e:
+                        err = str(e)
                         logger.error("label failed for %s: %s", t.thread_id, e)
-                        with counters_lock:
-                            counters["errors"] += 1
+            if err is not None:
+                with counters_lock:
+                    counters["errors"] += 1
+                with log_lock:
+                    _log(log_fh, t, "error", None,
+                         f"label apply failed: {err[:200]}")
+            else:
+                with counters_lock:
+                    counters["keep"] += 1
+                with log_lock:
+                    _log(log_fh, t, "keep", label,
+                         "" if not apply else "applied",
+                         reviewed_label=reviewed_label)
 
 
-def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str):
+def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str,
+         reviewed_label: str | None = None):
     rec = {
         "id": t.thread_id,
         "from": t.sender,
@@ -846,6 +999,8 @@ def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str):
         "label": label,
         "note": note,
     }
+    if reviewed_label:
+        rec["reviewed_label"] = reviewed_label
     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     fh.flush()
 

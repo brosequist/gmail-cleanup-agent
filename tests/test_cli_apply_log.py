@@ -7,6 +7,7 @@ each decision against Gmail. Tests cover:
   - resume: already-applied IDs are skipped
   - --limit caps the workload
   - missing label in --apply mode triggers an error row, not a crash
+  - a reviewed_label on a keep row is applied alongside the category label
 """
 
 from __future__ import annotations
@@ -200,6 +201,99 @@ def test_apply_log_error_action_is_skipped(tmp_path, patched_gmail):
     rows = [json.loads(l) for l in audit_path.read_text().splitlines()
             if l.strip().startswith("{")]
     assert {r["id"] for r in rows} == {"t2"}
+
+
+def test_apply_log_applies_reviewed_label(tmp_path, patched_gmail):
+    """A keep row with a reviewed_label field applies the category label
+    AND the reviewed label in one modify call, creating the reviewed
+    label if it's new to the account."""
+    log = tmp_path / "dry-run.log"
+    _write_log(log, [
+        {"id": "t1", "action": "keep", "label": "Receipts",
+         "reviewed_label": "Reviewed", "note": ""},
+    ])
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "apply-log", "--apply", "--log-file", str(log),
+        "--state-file", str(tmp_path / "state-applied.json"),
+        "--audit-log", str(tmp_path / "applied.log"),
+        "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
+    ])
+    assert result.exit_code == 0, result.output
+
+    fake = patched_gmail["client"]
+    # "Reviewed" was not in the fake's catalog -> created
+    assert "Reviewed" in fake.created_labels
+    # exactly one modify, carrying both label ids
+    modify_calls = fake._service._modify_calls
+    assert len(modify_calls) == 1
+    tid, body = modify_calls[0]
+    assert tid == "t1"
+    assert set(body["addLabelIds"]) == {
+        fake._labels["Receipts"], fake._labels["Reviewed"]}
+
+    audit_rows = [json.loads(l) for l in (tmp_path / "applied.log")
+                  .read_text().splitlines() if l.strip().startswith("{")]
+    by_id = {r["id"]: r for r in audit_rows}
+    assert by_id["t1"]["result"] == "keep_labeled"
+    assert by_id["t1"]["reviewed_label"] == "Reviewed"
+
+
+def test_apply_log_reviewed_label_only_is_not_keep_nolabel(tmp_path,
+                                                           patched_gmail):
+    """A keep row with no category label but a reviewed_label must still
+    be applied — not short-circuited as keep_nolabel."""
+    log = tmp_path / "dry-run.log"
+    _write_log(log, [
+        {"id": "t1", "action": "keep", "label": None,
+         "reviewed_label": "Reviewed", "note": "whitelist"},
+    ])
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "apply-log", "--apply", "--log-file", str(log),
+        "--state-file", str(tmp_path / "state.json"),
+        "--audit-log", str(tmp_path / "applied.log"),
+        "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
+    ])
+    assert result.exit_code == 0, result.output
+
+    fake = patched_gmail["client"]
+    modify_calls = fake._service._modify_calls
+    assert len(modify_calls) == 1
+    tid, body = modify_calls[0]
+    assert tid == "t1"
+    assert body["addLabelIds"] == [fake._labels["Reviewed"]]
+
+    audit_rows = [json.loads(l) for l in (tmp_path / "applied.log")
+                  .read_text().splitlines() if l.strip().startswith("{")]
+    by_id = {r["id"]: r for r in audit_rows}
+    assert by_id["t1"]["result"] == "keep_labeled"
+
+
+def test_apply_log_dry_run_preview_shows_reviewed_label(tmp_path, patched_gmail):
+    """--dry-run preview rows surface the reviewed_label without mutating."""
+    log = tmp_path / "dry-run.log"
+    _write_log(log, [
+        {"id": "t1", "action": "keep", "label": "Receipts",
+         "reviewed_label": "Reviewed", "note": ""},
+    ])
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "apply-log", "--dry-run", "--log-file", str(log),
+        "--audit-log", str(tmp_path / "preview.log"),
+        *_creds_args(patched_gmail),
+    ])
+    assert result.exit_code == 0, result.output
+
+    fake = patched_gmail["client"]
+    assert fake._service._modify_calls == []  # nothing mutated
+    rows = [json.loads(l) for l in (tmp_path / "preview.log")
+            .read_text().splitlines() if l.strip().startswith("{")]
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["t1"]["result"] == "keep_labeled"
+    assert by_id["t1"]["reviewed_label"] == "Reviewed"
 
 
 def test_apply_log_latest_decision_wins(tmp_path, patched_gmail):

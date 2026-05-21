@@ -4,8 +4,11 @@ Reads a decision log (e.g. dry-run.log), keeps the latest decision per
 thread ID, and replays each one via Gmail's batch HTTP endpoint:
 
   - action="trash"            -> users().threads().trash(...)
-  - action="keep", label=X    -> users().threads().modify(addLabelIds=[X])
-  - action="keep", label=None -> no Gmail call (already kept)
+  - action="keep"             -> users().threads().modify(addLabelIds=[...])
+                                 labels = the category label and/or the
+                                 `reviewed_label` the classify run recorded
+                                 on the row; a keep with neither makes no
+                                 Gmail call (already kept, nothing to add)
   - action="error"            -> skipped (never applied)
 
 Single-threaded — the existing GmailClient is not thread-safe (see
@@ -37,6 +40,21 @@ BATCH_SIZE = 20  # Sub-requests per batch. Gmail's batch endpoint accepts up
                  # to 100 but per-user concurrent ceiling is ~20; larger
                  # batches add 429s without improving the ~3.3 ops/sec ceiling.
 MAX_429_RETRIES = 5
+
+
+def _keep_label_names(d: dict) -> list[str]:
+    """Label names a `keep` decision should apply: the category label the
+    classifier chose (if any), plus the `--reviewed-label` name the
+    classify run recorded on the row (if any). Either may be absent.
+    Category-first so audit output and modify calls read naturally."""
+    names: list[str] = []
+    label = d.get("label")
+    if label:
+        names.append(label)
+    reviewed = d.get("reviewed_label")
+    if reviewed and reviewed not in names:
+        names.append(reviewed)
+    return names
 
 
 def load_latest_decisions(log_path: Path) -> dict[str, dict]:
@@ -77,9 +95,11 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
                 else:
                     counters["keep_labeled"] += 1
                     result = "keep_labeled"
-                audit_fh.write(json.dumps({
-                    "id": request_id, "result": result,
-                    "label": d.get("label")}) + "\n")
+                audit_rec = {"id": request_id, "result": result,
+                             "label": d.get("label")}
+                if d.get("reviewed_label"):
+                    audit_rec["reviewed_label"] = d["reviewed_label"]
+                audit_fh.write(json.dumps(audit_rec) + "\n")
                 return
             err = str(exception)
             if "429" in err or "rate" in err.lower() or "concurrent" in err.lower():
@@ -98,7 +118,8 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
             else:
                 req = service.users().threads().modify(
                     userId="me", id=tid,
-                    body={"addLabelIds": [label_ids[d["label"]]]})
+                    body={"addLabelIds": [label_ids[n]
+                                          for n in _keep_label_names(d)]})
             batch.add(req, request_id=tid)
         try:
             batch.execute()
@@ -178,10 +199,10 @@ def run_apply_log(
     service = client._service  # noqa: SLF001
     label_ids: dict[str, str] = client.list_labels()
 
-    needed_labels = {
-        d.get("label") for d in pending
-        if d["action"] == "keep" and d.get("label")
-    }
+    needed_labels: set[str] = set()
+    for d in pending:
+        if d["action"] == "keep":
+            needed_labels.update(_keep_label_names(d))
     missing = sorted(needed_labels - set(label_ids.keys()))
     if missing:
         if apply:
@@ -214,7 +235,9 @@ def run_apply_log(
                 tid = d["id"]
                 action = d["action"]
                 label = d.get("label")
-                if action == "keep" and not label:
+                # All labels a keep should apply: category + reviewed_label.
+                names = _keep_label_names(d) if action == "keep" else []
+                if action == "keep" and not names:
                     counters["keep_nolabel"] += 1
                     audit_fh.write(json.dumps(
                         {"id": tid, "result": "keep_nolabel", "label": None}) + "\n")
@@ -228,14 +251,17 @@ def run_apply_log(
                             {"id": tid, "result": "trash", "label": None}) + "\n")
                     else:
                         counters["keep_labeled"] += 1
-                        audit_fh.write(json.dumps(
-                            {"id": tid, "result": "keep_labeled", "label": label}) + "\n")
+                        rec = {"id": tid, "result": "keep_labeled", "label": label}
+                        if d.get("reviewed_label"):
+                            rec["reviewed_label"] = d["reviewed_label"]
+                        audit_fh.write(json.dumps(rec) + "\n")
                     continue
-                if action == "keep" and label and not label_ids.get(label):
+                unresolved = [n for n in names if not label_ids.get(n)]
+                if unresolved:
                     counters["error"] += 1
                     audit_fh.write(json.dumps(
                         {"id": tid, "result": "error",
-                         "err": f"label {label!r} not resolved"}) + "\n")
+                         "err": f"label(s) not resolved: {unresolved}"}) + "\n")
                     continue
                 to_apply.append(d)
 

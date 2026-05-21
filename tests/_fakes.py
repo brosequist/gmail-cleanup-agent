@@ -107,6 +107,10 @@ class FakeGmailClient:
         self._service = FakeService()
         self._service.labels = self._labels
         self.last_include_body: bool | None = None
+        self.last_query: str | None = None
+        # Thread IDs whose mutation calls should raise — lets tests
+        # exercise the apply-failure -> error path.
+        self.fail_on: set[str] = set()
 
     def authorize(self, force: bool = False) -> None:
         self._authorized = True
@@ -122,6 +126,7 @@ class FakeGmailClient:
 
     def search_threads(self, query, *, max_threads=None, skip_ids=None,
                        include_body=False, page_size=100):
+        self.last_query = query
         self.last_include_body = include_body
         skip_ids = skip_ids or set()
         n = 0
@@ -137,13 +142,19 @@ class FakeGmailClient:
             n += 1
 
     def trash_thread(self, tid: str) -> None:
+        if tid in self.fail_on:
+            raise RuntimeError(f"simulated Gmail failure for {tid}")
         self.trashed.append(tid)
 
     def add_label_to_thread(self, tid: str, label_id: str) -> None:
+        if tid in self.fail_on:
+            raise RuntimeError(f"simulated Gmail failure for {tid}")
         self.labeled.append((tid, label_id))
 
     def modify_thread_labels(self, tid: str,
                              add_label_ids=None, remove_label_ids=None) -> None:
+        if tid in self.fail_on:
+            raise RuntimeError(f"simulated Gmail failure for {tid}")
         self.modified.append({"id": tid, "add": add_label_ids or [],
                               "remove": remove_label_ids or []})
 

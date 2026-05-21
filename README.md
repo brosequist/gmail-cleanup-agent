@@ -60,6 +60,9 @@ the procedure and concrete numbers from one real run.
   classified as trash, regardless of LLM judgment.
 - **Auto-create labels** — for important categories that don't exist
   yet, the agent creates them based on your `labels.yaml` catalog.
+- **Mark reviewed mail** — opt-in `--reviewed-label` tags every kept
+  email so re-runs skip it; `--skip-label` excludes further labels
+  from a pass.
 - **Audit trail** — every decision logged with sender, subject,
   action, label, and reason.
 
@@ -332,9 +335,12 @@ python -m gmail_cleanup classify --help # --query, --apply, --dry-run, --concurr
 ### Recovering from a transient backend failure: `--retry-errors`
 
 If a Ollama / llama.cpp / OpenAI hiccup mass-errored a batch of
-threads, you'll see `action: "error"` rows in `dry-run.log`. Re-run
-classify with `--retry-errors` to re-classify only those threads
-(the resume set is the union of non-errored IDs):
+threads — or, under `--apply`, a Gmail `trash`/label call failed —
+you'll see `action: "error"` rows in `dry-run.log` (or `applied.log`).
+A failed Gmail mutation is logged as `error`, never as a silent
+`keep`/`trash`, so the log never claims a change that did not land.
+Re-run classify with `--retry-errors` to re-classify only those
+threads (the resume set is the union of non-errored IDs):
 
 ```bash
 python -m gmail_cleanup classify \
@@ -345,6 +351,77 @@ python -m gmail_cleanup classify \
 The 312k-thread reference run finished with **0 final errors** after
 a single retry pass over 809 errored threads — see
 [docs/results.md](docs/results.md#retry-pass).
+
+### Marking reviewed mail: `--reviewed-label` and `--skip-label`
+
+Two opt-in flags — both off unless you pass them — let you tag mail the
+tool has already looked at and exclude it from later passes.
+
+**`--reviewed-label`** applies a label to every email the LLM
+**keeps** — whitelisted senders included — *regardless* of which
+category label it received. Trashed and errored emails are never
+labeled. Pass it bare to use the default name `Reviewed`, or
+`--reviewed-label=NAME` for a custom name:
+
+```bash
+# default name "Reviewed"
+python -m gmail_cleanup classify --query "..." --apply --reviewed-label
+
+# custom name
+python -m gmail_cleanup classify --query "..." --apply --reviewed-label="LLM Reviewed"
+```
+
+The reviewed-label name is **automatically excluded from this run and
+every future one**: classify appends `-label:"<name>"` to your Gmail
+query, so any email already carrying it is filtered out server-side —
+never listed, never fetched, never sent to the LLM. Re-running classify
+after a partial pass therefore never re-reviews mail it already
+finished, independent of `state.json`.
+
+**`--skip-label NAME`** excludes additional labels the same way, and is
+repeatable — handy for protecting manually-applied "do not touch"
+labels:
+
+```bash
+python -m gmail_cleanup classify --query "..." --apply \
+  --reviewed-label \
+  --skip-label "Keep Forever" --skip-label "Pinned"
+```
+
+A couple of notes:
+
+- Because `--reviewed-label` takes an *optional* value, a custom name
+  must be attached with `=` (`--reviewed-label=NAME`), not a space.
+  `--skip-label` takes its value normally.
+- If the `--reviewed-label` name collides with a category label in
+  `labels.yaml`, classify logs a warning and continues — that whole
+  category would otherwise be silently excluded from future runs. Pick
+  a distinct name (the default `Reviewed` is a safe choice). The check
+  is case-insensitive, since Gmail label search is.
+- If the `--reviewed-label` name differs only in casing from a label
+  already in your account (e.g. you type `reviewed`, the label
+  `Reviewed` exists), the existing label is reused — no near-duplicate
+  is created.
+- Nested label names (`Parent/Child`) work as reviewed- or skip-labels.
+  A name containing a double-quote (`"`) cannot be expressed as a Gmail
+  query term, so it is dropped from the skip filter with a warning; the
+  label is still applied normally if it's the reviewed-label.
+- `--skip-label` excludes specific *labels*. To instead skip *unlabeled*
+  mail — i.e. classify only mail that already has at least one label —
+  that's a `--query` matter, not `--skip-label`: add `has:userlabels`
+  (the default query uses the opposite, `-has:userlabels`).
+- To deliberately *re-review* already-labeled mail, reference the label
+  in your own `--query` (e.g. `--query 'older_than:90d label:"Reviewed"'`):
+  when the query already mentions a label, classify does not add the
+  `-label:` skip filter for it.
+- In `--dry-run` mode the reviewed label is logged as intent (a
+  `reviewed_label` field on each kept row) but not applied — same as
+  every other Gmail mutation. The skip-query filter still applies in
+  dry-run. Replaying that log later with [`apply-log`](#applying-decisions-from-a-dry-run-the-apply-log-pass)
+  honors the `reviewed_label` field: it applies the reviewed label
+  alongside the category label (creating it if new), so the
+  dry-run → `apply-log` workflow ends in the same Gmail state as a
+  direct `classify --apply`.
 
 ## Applying decisions from a dry-run: the `apply-log` pass
 
@@ -374,7 +451,8 @@ Key properties:
 
 - **No LLM call.** It just reads the JSONL log and translates each
   row into a Gmail batch HTTP request — trash for `action: "trash"`,
-  `threads.modify(addLabelIds=...)` for `action: "keep"` + label.
+  `threads.modify(addLabelIds=...)` for `action: "keep"`, applying the
+  category label plus the `reviewed_label` if the row carries one.
 - **Latest decision wins.** Multiple log lines with the same thread
   id collapse to the most recent one. Re-running classify and then
   apply-log is safe.

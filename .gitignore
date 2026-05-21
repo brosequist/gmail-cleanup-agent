@@ -12,6 +12,9 @@ config/backend.env
 state*.json
 out/
 
+# Local one-off scripts (not part of the published package)
+add-reviewed-label.py
+
 # Python
 __pycache__/
 *.pyc
