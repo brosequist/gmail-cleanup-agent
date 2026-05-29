@@ -6,6 +6,15 @@
 #              will create these labels in your Gmail the first time
 #              they're applied. Each entry has a one-line description
 #              that goes into the LLM prompt to guide classification.
+# `removable` — OPTIONAL. Labels the LLM may *propose* stripping from a
+#              kept email when they no longer apply. The prompt grows
+#              by a "Removable labels" section + a "Current labels:"
+#              line on each thread; the model returns an optional
+#              `remove_labels: [...]` array per decision. A proposed
+#              strip is only honored when (a) the label is in this
+#              catalog AND (b) the label is currently on the thread.
+#              Independent of `--remove-label NAME` on the CLI, which
+#              strips unconditionally with no LLM input.
 #
 # DESIGN TIPS (from a real 312k-thread run):
 #
@@ -55,3 +64,13 @@ auto_create:
 #  Subscriptions: "active subscription account state (renewals, billing changes, cancellations) — NOT subscription marketing"
 #  Veterans: "VA correspondence, military service organizations, veteran benefit notices — only useful if you're a veteran"
 #  Daycare: "daycare/preschool daily reports, billing, communications from caregivers — only useful if you're a parent"
+
+# Optional: labels the LLM may *propose* removing per kept email. Empty /
+# absent = LLM-driven removal is off. Each entry describes when stripping
+# the label is appropriate; the description goes into the prompt. Keep
+# the catalog tight — every entry costs prompt tokens on every batch.
+#
+# removable:
+#   OldNewsletters: "auto-applied newsletter tag from a vendor we no longer use"
+#   LegacyImport: "tag from a 2018 inbox import — strip when the email is otherwise getting a fresh category"
+#   ToReview: "a personal to-review marker; strip after the email is filed"

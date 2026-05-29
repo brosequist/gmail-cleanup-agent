@@ -57,11 +57,13 @@ def fake_thread():
     """Helper to mint a ThreadSummary with sensible defaults."""
     def _make(tid="t1", sender="alice@acme.com", subject="hi",
               snippet="hello there", age_days=10,
-              has_list_unsubscribe=False, body=""):
+              has_list_unsubscribe=False, body="",
+              current_labels=None):
         return ThreadSummary(
             thread_id=tid, sender=sender, subject=subject, snippet=snippet,
             date="Mon, 1 Jan 2024", age_days=age_days,
             has_list_unsubscribe=has_list_unsubscribe, body=body,
+            current_labels=list(current_labels) if current_labels else [],
         )
     return _make
 

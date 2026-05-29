@@ -8,7 +8,7 @@ import logging
 import socket
 import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -119,6 +119,12 @@ class ThreadSummary:
     age_days: int | None = None
     has_list_unsubscribe: bool = False
     body: str = ""
+    # User-defined labels currently on the thread, by display name.
+    # System labels (INBOX, UNREAD, CATEGORY_*) are filtered out — they
+    # aren't candidates for LLM-driven removal and they'd just be prompt
+    # noise. Populated by search_threads/fetch_thread_meta via the
+    # client's label-id → name map.
+    current_labels: list[str] = field(default_factory=list)
 
 
 # Hard cap on per-email body text in the prompt. The first 4 KB of a
@@ -196,6 +202,11 @@ class GmailClient:
         self.credentials_path = credentials_path
         self.token_path = token_path
         self._service = None
+        # Lazy cache of {label_id: user_facing_name} for user-defined
+        # labels only. System labels (INBOX, UNREAD, CATEGORY_*) are
+        # filtered out here — for those, the API returns id == name and
+        # they're never targets for LLM-driven removal anyway.
+        self._user_label_name_by_id: dict[str, str] | None = None
 
     # ---------- auth ----------
 
@@ -261,6 +272,29 @@ class GmailClient:
         res = _retry_gmail(_do, on_rebuild=self._rebuild_service)
         return {l["name"]: l["id"] for l in res.get("labels", [])}
 
+    def _user_label_id_to_name(self) -> dict[str, str]:
+        """Return {label_id: name} for user-defined labels only.
+
+        Gmail returns `id == name` for system labels (INBOX, UNREAD,
+        CATEGORY_*), so they're filtered out by the id != name test —
+        leaving just user labels like `{"Label_42": "Receipts"}`.
+        Cached after first call; reset on `create_label` so freshly-made
+        labels show up if we re-translate.
+        """
+        if self._user_label_name_by_id is None:
+            def _do():
+                return self.service.users().labels().list(userId="me").execute()
+            res = _retry_gmail(_do, on_rebuild=self._rebuild_service)
+            self._user_label_name_by_id = {
+                l["id"]: l["name"] for l in res.get("labels", [])
+                if l.get("id") != l.get("name")
+            }
+        return self._user_label_name_by_id
+
+    def _names_for_label_ids(self, label_ids: list[str]) -> list[str]:
+        m = self._user_label_id_to_name()
+        return [m[lid] for lid in label_ids if lid in m]
+
     def create_label(self, name: str) -> str:
         """Create a user label, return its ID. Idempotent."""
         existing = self.list_labels()
@@ -274,6 +308,9 @@ class GmailClient:
         def _do():
             return self.service.users().labels().create(userId="me", body=body).execute()
         res = _retry_gmail(_do, on_rebuild=self._rebuild_service)
+        # Reset the id->name cache so a freshly-made label resolves on
+        # the next translation. (The cache is rebuilt lazily on demand.)
+        self._user_label_name_by_id = None
         return res["id"]
 
     # ---------- threads ----------
@@ -369,6 +406,8 @@ class GmailClient:
                     age_days=_compute_age_days(meta.get("internalDate")),
                     has_list_unsubscribe=bool(hdrs.get("List-Unsubscribe")),
                     body=body,
+                    current_labels=self._names_for_label_ids(
+                        meta.get("labelIds", []) or []),
                 )
                 yielded += 1
                 if max_threads and yielded >= max_threads:
@@ -420,6 +459,8 @@ class GmailClient:
             date=hdrs.get("Date", ""),
             age_days=_compute_age_days(first.get("internalDate")),
             has_list_unsubscribe=bool(hdrs.get("List-Unsubscribe")),
+            current_labels=self._names_for_label_ids(
+                first.get("labelIds", []) or []),
         )
 
     def trash_thread(self, thread_id: str) -> None:

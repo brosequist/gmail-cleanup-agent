@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gmail-llm-cleanup"
-version = "1.2.1"
+version = "1.3.0"
 description = "Triage a Gmail inbox with a local or cloud LLM"
 readme = "README.md"
 license = { text = "MIT" }

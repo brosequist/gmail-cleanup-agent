@@ -74,16 +74,30 @@ class _Messages:
         return self._msg_responses[id]
 
 
+class _Labels:
+    """Empty labels endpoint — search_threads now triggers a one-time
+    lookup to translate each thread's labelIds into user-label names.
+    Returning an empty list is fine for these tests; they only assert on
+    thread filtering, not label translation."""
+
+    def list(self, *, userId):  # noqa: A002
+        return _ThreadsListExecutable({"labels": []})
+
+
 class _Users:
     def __init__(self, threads, messages):
         self._threads = threads
         self._messages = messages
+        self._labels = _Labels()
 
     def threads(self):
         return self._threads
 
     def messages(self):
         return self._messages
+
+    def labels(self):
+        return self._labels
 
 
 class _Service:

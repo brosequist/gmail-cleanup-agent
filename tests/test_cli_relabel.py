@@ -175,6 +175,53 @@ def test_relabel_refetch_snippets_calls_fetch_thread_meta(tmp_path, patched,
     assert fetch_calls == ["t1"]
 
 
+def test_relabel_remove_label_strips_unconditionally(tmp_path, patched):
+    """--remove-label NAME strips NAME from every relabel-touched thread,
+    issuing a modify even when the category label didn't change."""
+    src = tmp_path / "src.log"
+    _write_log(src, [
+        {"id": "t1", "from": "a", "subject": "s",
+         "action": "keep", "label": "Receipts"},
+    ])
+    # patched fixture defaults labels to {Receipts: Label_1, Family: Label_2}
+    # — add LegacyAuto via fixture's underlying client.
+    patched["backend_responses"] = [json.dumps({"decisions": [
+        {"id": "t1", "label": "Receipts"},  # unchanged
+    ]})]
+    # We need the label resolver to know about LegacyAuto — wire it through
+    # the FakeGmailClient default labels.
+    from tests._fakes import FakeGmailClient
+    custom = FakeGmailClient(threads_to_yield=[])
+    custom._labels["LegacyAuto"] = "Label_99"
+    custom._service.labels = custom._labels
+    monkeypatch_called = {"client": custom}
+    import gmail_cleanup.cli as cli_module
+    cli_module._client = lambda: custom
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "relabel", "--apply", "--input-log", str(src),
+        "--log-file", str(tmp_path / "relabel.log"),
+        "--state-file", str(tmp_path / "relabel-state.json"),
+        "--concurrency", "1",
+        "--confirm-every", "0",
+        "--remove-label", "LegacyAuto",
+    ])
+    assert result.exit_code == 0, result.output
+
+    # Even though the category label is unchanged, the forced removal
+    # triggers a modify with add=[] remove=[LegacyAuto.id]
+    assert len(custom.modified) == 1
+    mod = custom.modified[0]
+    assert mod["id"] == "t1"
+    assert mod["add"] == []
+    assert mod["remove"] == ["Label_99"]
+
+    rows = [json.loads(l) for l in (tmp_path / "relabel.log").read_text()
+            .splitlines() if l.strip().startswith("{")]
+    assert rows[0]["removed_labels"] == ["LegacyAuto"]
+
+
 def test_relabel_backend_error_keeps_existing_label(tmp_path, patched):
     """If the backend raises on the first call, relabel must NOT drop
     any labels — the existing label survives. This is the safe-failure

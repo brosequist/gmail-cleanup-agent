@@ -423,6 +423,58 @@ A couple of notes:
   dry-run → `apply-log` workflow ends in the same Gmail state as a
   direct `classify --apply`.
 
+### Removing labels: `--remove-label` and `removable:`
+
+Two opt-in mechanisms strip labels off threads the cleanup pass touches:
+one unconditional, one LLM-driven. They stack.
+
+**`--remove-label NAME`** (repeatable on `classify` and `relabel`)
+unconditionally strips NAME from every kept and whitelisted thread the
+pass touches, with no LLM input. Trashed threads are skipped — trash
+already hides labels. The removal is folded into the same
+`threads.modify` call as the category label / reviewed-label so each
+thread still costs one Gmail mutation. Useful for retiring a legacy
+label across the mailbox in one pass:
+
+```bash
+# Retire a stale `Imported2019` label across everything that still has it
+python -m gmail_cleanup classify \
+  --query 'label:Imported2019' \
+  --apply --remove-label Imported2019
+```
+
+If `NAME` doesn't exist as a Gmail label, classify warns and skips it
+(there's nothing to strip). The decision log records every actual
+removal as a `removed_labels: ["X"]` field on the row.
+
+**`removable:` in `labels.yaml`** turns on LLM-driven removal. Each
+entry is `LabelName: "description of when to strip it"`. The classifier
+adds a *Removable labels* section to the prompt plus a `Current labels:
+…` line per thread, and the model may return an optional
+`remove_labels: [...]` array per decision. A proposed strip is honored
+only when (a) the label is in the catalog AND (b) it's actually on the
+thread. The prompt grows by ~one paragraph + ~one line per thread, so
+keep the catalog tight.
+
+```yaml
+removable:
+  OldNewsletters: "auto-applied newsletter tag from a vendor we no longer use"
+  ToReview: "a personal to-review marker; strip after the email is filed"
+```
+
+A few sharp edges:
+
+- `--remove-label NAME` and a `removable:` entry for the same NAME are
+  not an error, but classify warns: the forced strip always wins, so
+  the catalog entry is redundant for that run.
+- For `relabel`, LLM-driven removal requires `--refetch-snippets`. The
+  decision log doesn't store per-thread label state, so without that
+  flag there's no `Current labels:` line and every proposed strip
+  fails validation.
+- Trashed and errored threads never get removal mutations.
+- In `--dry-run`, the intended removals are logged as
+  `removed_labels: [...]` but no Gmail call is made.
+
 ## Applying decisions from a dry-run: the `apply-log` pass
 
 After a dry-run produces `dry-run.log`, you can replay its decisions

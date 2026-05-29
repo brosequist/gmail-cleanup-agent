@@ -240,3 +240,148 @@ def test_validate_relabel_decisions_rejects_unknown_label(catalog):
     assert out == []
     assert missing == {"x"}
     assert any("unknown label" in e for e in errs)
+
+
+# ---------------- removable: catalog + remove_labels output ----------------
+
+
+@pytest.fixture
+def removable_catalog():
+    return LabelCatalog(
+        existing=["Filed"],
+        auto_create={"Receipts": "orders"},
+        removable={"OldNewsletters": "newsletters from a vendor we no longer use",
+                   "LegacyAuto": "auto-tag we are retiring"},
+    )
+
+
+def test_label_catalog_load_reads_removable(tmp_path: Path):
+    p = tmp_path / "labels.yaml"
+    p.write_text(
+        "existing:\n  - Filed\n"
+        "auto_create:\n  Receipts: orders\n"
+        "removable:\n  OldNewsletters: stale vendor tag\n"
+    )
+    cat = LabelCatalog.load(p)
+    assert cat.removable == {"OldNewsletters": "stale vendor tag"}
+
+
+def test_label_catalog_load_missing_removable_is_empty(tmp_path: Path):
+    """Files predating the feature have no `removable:` key — it
+    should default to an empty dict, not raise."""
+    p = tmp_path / "labels.yaml"
+    p.write_text("existing:\n  - Filed\nauto_create:\n  Receipts: orders\n")
+    cat = LabelCatalog.load(p)
+    assert cat.removable == {}
+
+
+def test_build_prompt_no_removable_section_when_catalog_empty(catalog):
+    """With an empty removable catalog the prompt should NOT carry a
+    'Removable labels' header or a 'remove_labels' schema field — we
+    don't want to spend tokens on a feature the user isn't using."""
+    out = build_prompt("rules", catalog, [
+        {"id": "x", "sender": "s", "subject": "j", "snippet": "k",
+         "current_labels": ["Filed"]},
+    ])
+    assert "Removable labels" not in out
+    assert "remove_labels" not in out
+    # current_labels line is also suppressed when removable is off
+    assert "Current labels:" not in out
+
+
+def test_build_prompt_renders_removable_section_and_current_labels(
+        removable_catalog):
+    out = build_prompt("rules", removable_catalog, [
+        {"id": "x", "sender": "s", "subject": "j", "snippet": "k",
+         "current_labels": ["LegacyAuto", "Receipts"]},
+    ])
+    assert "Removable labels" in out
+    assert "OldNewsletters" in out
+    assert "LegacyAuto" in out
+    assert "Current labels: LegacyAuto, Receipts" in out
+    # Schema example mentions the new optional field
+    assert '"remove_labels"' in out
+
+
+def test_build_prompt_skips_current_labels_line_when_thread_has_none(
+        removable_catalog):
+    """A thread with no current_labels shouldn't emit a 'Current labels:'
+    line even when the removable catalog is active."""
+    out = build_prompt("rules", removable_catalog, [
+        {"id": "x", "sender": "s", "subject": "j", "snippet": "k",
+         "current_labels": []},
+    ])
+    assert "Removable labels" in out
+    assert "Current labels:" not in out
+
+
+def test_validate_decisions_strict_accepts_remove_labels(removable_catalog):
+    """A keep decision with a valid `remove_labels` array carries it
+    through to the validated output."""
+    batch = [{"id": "a", "current_labels": ["LegacyAuto"]}]
+    decs = [{"id": "a", "action": "keep", "label": "Receipts",
+             "remove_labels": ["LegacyAuto"]}]
+    good, missing, _ = validate_decisions_strict(decs, batch, removable_catalog)
+    assert missing == set()
+    assert good[0]["remove_labels"] == ["LegacyAuto"]
+
+
+def test_validate_decisions_strict_drops_remove_labels_not_in_catalog(
+        removable_catalog):
+    """A label not in catalog.removable is dropped with an error event;
+    the decision is still accepted."""
+    batch = [{"id": "a", "current_labels": ["Receipts"]}]
+    decs = [{"id": "a", "action": "keep", "label": "Receipts",
+             "remove_labels": ["Receipts"]}]  # Receipts is keep, not removable
+    good, missing, errs = validate_decisions_strict(decs, batch, removable_catalog)
+    assert missing == set()
+    assert "remove_labels" not in good[0]
+    assert any("not in removable catalog" in e for e in errs)
+
+
+def test_validate_decisions_strict_drops_remove_labels_not_on_thread(
+        removable_catalog):
+    """A label in the catalog but NOT on the thread is silently dropped
+    (not an error — the model might just have stale label state)."""
+    batch = [{"id": "a", "current_labels": ["Receipts"]}]
+    decs = [{"id": "a", "action": "keep", "label": "Receipts",
+             "remove_labels": ["LegacyAuto"]}]
+    good, missing, errs = validate_decisions_strict(decs, batch, removable_catalog)
+    assert missing == set()
+    assert "remove_labels" not in good[0]
+    # No error event for missing-from-thread — silent drop
+    assert not any("not in removable catalog" in e for e in errs)
+
+
+def test_validate_decisions_strict_strips_remove_labels_on_trash(
+        removable_catalog):
+    """Trash decisions silently drop remove_labels — trash hides labels
+    anyway, so the strip would be wasted."""
+    batch = [{"id": "a", "current_labels": ["LegacyAuto"]}]
+    decs = [{"id": "a", "action": "trash", "label": None,
+             "remove_labels": ["LegacyAuto"]}]
+    good, missing, _ = validate_decisions_strict(decs, batch, removable_catalog)
+    assert missing == set()
+    assert "remove_labels" not in good[0]
+    assert good[0]["action"] == "trash"
+
+
+def test_validate_relabel_decisions_accepts_remove_labels(removable_catalog):
+    batch = [{"id": "x", "current_labels": ["OldNewsletters"]}]
+    out, missing, _ = validate_relabel_decisions(
+        [{"id": "x", "label": "Receipts",
+          "remove_labels": ["OldNewsletters"]}],
+        batch, removable_catalog,
+    )
+    assert missing == set()
+    assert out[0]["remove_labels"] == ["OldNewsletters"]
+
+
+def test_build_relabel_prompt_renders_removable_section(removable_catalog):
+    out = build_relabel_prompt(removable_catalog, [
+        {"id": "x", "sender": "s", "subject": "j", "current_label": "Filed",
+         "current_labels": ["Filed", "OldNewsletters"]},
+    ])
+    assert "Removable labels" in out
+    assert "Current labels: Filed, OldNewsletters" in out
+    assert '"remove_labels"' in out

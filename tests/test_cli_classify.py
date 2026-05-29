@@ -685,3 +685,207 @@ def test_classify_skip_label_with_quote_omits_filter(tmp_path, patched,
     assert result.exit_code == 0, result.output
     assert patched["client"].last_query == "base"
     assert "double-quote" in caplog.text
+
+
+# ---------------- --remove-label / removable catalog ----------------
+
+
+def test_classify_remove_label_apply_strips_from_kept_and_whitelisted(
+        tmp_path, patched, fake_thread, config_dir, decisions_json):
+    """--remove-label NAME strips NAME from every kept + whitelisted
+    thread under --apply. Trashed threads are left alone (trash hides
+    labels anyway)."""
+    patched["labels"] = {"Receipts": "Label_1", "Family": "Label_2",
+                         "LegacyAuto": "Label_99"}
+    patched["threads"] = [
+        fake_thread(tid="w1", sender="trusted@example-keep.com"),
+        fake_thread(tid="t1", sender="alice@acme.com"),
+        fake_thread(tid="t2", sender="bob@acme.com"),
+    ]
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts"},
+        {"id": "t2", "action": "trash", "label": None},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "q", "--remove-label", "LegacyAuto",
+        "--batch-size", "5",
+    ])
+    assert result.exit_code == 0, result.output
+
+    mods = {m["id"]: m for m in patched["client"].modified}
+    # kept email: category label added, LegacyAuto removed in same modify
+    assert mods["t1"]["add"] == ["Label_1"]
+    assert mods["t1"]["remove"] == ["Label_99"]
+    # whitelisted email: no add, LegacyAuto removed
+    assert mods["w1"]["add"] == []
+    assert mods["w1"]["remove"] == ["Label_99"]
+    # trashed email: trashed, never modified
+    assert patched["client"].trashed == ["t2"]
+    assert "t2" not in mods
+
+    rows = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert rows["t1"]["removed_labels"] == ["LegacyAuto"]
+    assert rows["w1"]["removed_labels"] == ["LegacyAuto"]
+    assert "removed_labels" not in rows["t2"]
+
+
+def test_classify_remove_label_dry_run_logs_intent_no_mutation(
+        tmp_path, patched, decisions_json):
+    """--remove-label under --dry-run logs the intended removal but
+    never calls Gmail."""
+    patched["labels"] = {"Receipts": "Label_1", "Family": "Label_2",
+                         "LegacyAuto": "Label_99"}
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts"},
+        {"id": "t2", "action": "trash", "label": None},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--dry-run", "--concurrency", "1", "--query", "q",
+        "--remove-label", "LegacyAuto",
+    ])
+    assert result.exit_code == 0, result.output
+    assert patched["client"].modified == []
+    rows = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert rows["t1"]["removed_labels"] == ["LegacyAuto"]
+
+
+def test_classify_remove_label_unknown_label_warns(tmp_path, patched, caplog,
+                                                   decisions_json):
+    """A --remove-label name that's not a Gmail label is dropped with a
+    warning — there's nothing to strip."""
+    import logging
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts"},
+        {"id": "t2", "action": "trash", "label": None},
+    ])]
+    with caplog.at_level(logging.WARNING, logger="gmail_cleanup"):
+        result = _invoke_classify(tmp_path, [
+            "--apply", "--concurrency", "1", "--confirm-every", "0",
+            "--query", "q", "--remove-label", "DoesNotExist",
+        ])
+    assert result.exit_code == 0, result.output
+    assert "not a Gmail label" in caplog.text
+    # No removal happens — the modify for t1 only adds the category label
+    mods = {m["id"]: m for m in patched["client"].modified}
+    assert mods["t1"]["remove"] == []
+
+
+def test_classify_llm_driven_remove_labels(tmp_path, patched, fake_thread,
+                                            config_dir, decisions_json):
+    """When labels.yaml has a `removable:` section AND the model
+    proposes remove_labels, those labels are stripped (provided they
+    are on the thread)."""
+    # Add removable: to the test config
+    (config_dir / "labels.yaml").write_text(
+        "existing:\n  - Filed\n"
+        "auto_create:\n  Receipts: \"orders\"\n  Family: \"personal\"\n"
+        "removable:\n  OldNewsletters: \"vendor we no longer use\"\n"
+    )
+    patched["labels"] = {"Receipts": "Label_1", "Family": "Label_2",
+                         "OldNewsletters": "Label_42"}
+    # Thread t1 currently has OldNewsletters on it; model proposes
+    # removing OldNewsletters in the same decision as keep+Receipts.
+    patched["threads"] = [
+        fake_thread(tid="t1", sender="alice@acme.com",
+                    current_labels=["OldNewsletters"]),
+    ]
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts",
+         "remove_labels": ["OldNewsletters"]},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "q", "--batch-size", "5",
+    ])
+    assert result.exit_code == 0, result.output
+
+    mods = {m["id"]: m for m in patched["client"].modified}
+    assert mods["t1"]["add"] == ["Label_1"]
+    assert mods["t1"]["remove"] == ["Label_42"]
+    rows = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert rows["t1"]["removed_labels"] == ["OldNewsletters"]
+
+
+def test_classify_llm_proposed_remove_not_on_thread_silently_dropped(
+        tmp_path, patched, fake_thread, config_dir, decisions_json):
+    """Validation drops LLM-proposed removals for labels that aren't
+    actually on the thread (silent drop — the model can have stale
+    label state). The keep decision still goes through."""
+    (config_dir / "labels.yaml").write_text(
+        "existing:\n  - Filed\n"
+        "auto_create:\n  Receipts: \"orders\"\n  Family: \"personal\"\n"
+        "removable:\n  OldNewsletters: \"vendor we no longer use\"\n"
+    )
+    patched["labels"] = {"Receipts": "Label_1", "Family": "Label_2",
+                         "OldNewsletters": "Label_42"}
+    patched["threads"] = [
+        fake_thread(tid="t1", sender="alice@acme.com",
+                    current_labels=[]),  # nothing to remove
+    ]
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts",
+         "remove_labels": ["OldNewsletters"]},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "q", "--batch-size", "5",
+    ])
+    assert result.exit_code == 0, result.output
+    mods = {m["id"]: m for m in patched["client"].modified}
+    assert mods["t1"]["remove"] == []
+    rows = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert "removed_labels" not in rows["t1"]
+
+
+def test_classify_forced_and_llm_remove_dedup(tmp_path, patched, fake_thread,
+                                               config_dir, decisions_json):
+    """When the same label is in --remove-label AND the LLM also
+    proposes it, the apply uses each label-id once. The forced-first
+    dedup order is preserved."""
+    (config_dir / "labels.yaml").write_text(
+        "existing:\n  - Filed\n"
+        "auto_create:\n  Receipts: \"orders\"\n  Family: \"personal\"\n"
+        "removable:\n  OldNewsletters: \"vendor we no longer use\"\n"
+    )
+    patched["labels"] = {"Receipts": "Label_1", "Family": "Label_2",
+                         "OldNewsletters": "Label_42"}
+    patched["threads"] = [
+        fake_thread(tid="t1", sender="alice@acme.com",
+                    current_labels=["OldNewsletters"]),
+    ]
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts",
+         "remove_labels": ["OldNewsletters"]},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "q", "--remove-label", "OldNewsletters",
+        "--batch-size", "5",
+    ])
+    assert result.exit_code == 0, result.output
+    mods = {m["id"]: m for m in patched["client"].modified}
+    # exactly one removal id, not duplicated
+    assert mods["t1"]["remove"] == ["Label_42"]
+    rows = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert rows["t1"]["removed_labels"] == ["OldNewsletters"]
+
+
+def test_classify_remove_label_only_no_category_still_modifies(
+        tmp_path, patched, fake_thread, decisions_json):
+    """A keep decision with NO category label but a forced removal
+    still issues a threads.modify (just to do the strip)."""
+    patched["labels"] = {"Receipts": "Label_1", "LegacyAuto": "Label_99"}
+    patched["threads"] = [fake_thread(tid="t1")]
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": None},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "q", "--remove-label", "LegacyAuto",
+        "--batch-size", "5",
+    ])
+    assert result.exit_code == 0, result.output
+    mods = {m["id"]: m for m in patched["client"].modified}
+    assert mods["t1"]["add"] == []
+    assert mods["t1"]["remove"] == ["Label_99"]

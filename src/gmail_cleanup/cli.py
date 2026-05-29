@@ -215,9 +215,22 @@ def auth():
          "--reviewed-label name is skipped automatically; use this for "
          "additional, often manually-applied labels. Off when omitted.",
 )
+@click.option(
+    "--remove-label",
+    "remove_labels_forced",
+    metavar="NAME",
+    multiple=True,
+    help="Unconditionally strip label NAME from every thread classify "
+         "touches (kept and whitelisted alike). Trashed threads are "
+         "skipped — trashing already hides labels. Repeatable. Pair this "
+         "with `--query 'label:NAME'` to retire a legacy label across the "
+         "mailbox in one pass. For the LLM to *propose* removals "
+         "per-thread instead, define a `removable:` section in "
+         "config/labels.yaml. Off when omitted.",
+)
 def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
              state_file, log_file, concurrency, retry_errors, include_body,
-             console_log, reviewed_label, skip_labels):
+             console_log, reviewed_label, skip_labels, remove_labels_forced):
     """Classify and (optionally) act on threads matching `query`."""
 
     if console_log:
@@ -332,6 +345,33 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
             label_ids[reviewed_label] = client.create_label(reviewed_label)
         else:
             logger.info("--dry-run: would create reviewed-label %r", reviewed_label)
+
+    # --remove-label: resolve to (name, id) pairs once. A label that
+    # doesn't exist in Gmail is dropped with a warning — there's nothing
+    # to strip. A label that's also in catalog.removable is allowed but
+    # warned: it means the forced strip will always win over LLM
+    # judgment, which is probably not what the user wanted if they took
+    # the trouble to describe it as removable.
+    forced_remove: list[tuple[str, str]] = []
+    for name in remove_labels_forced:
+        lid = label_ids.get(name)
+        if lid is None:
+            logger.warning(
+                "--remove-label %r is not a Gmail label in this account; "
+                "ignoring (nothing to strip).", name)
+            continue
+        if name in catalog.removable:
+            logger.warning(
+                "--remove-label %r is also in the labels.yaml `removable:` "
+                "catalog. The forced strip will always remove it, making the "
+                "LLM-driven entry redundant for this run.", name)
+        forced_remove.append((name, lid))
+    if forced_remove:
+        logger.info("forced --remove-label targets: %s",
+                    ", ".join(n for n, _ in forced_remove))
+    if catalog.removable:
+        logger.info("removable catalog: %d labels available for LLM-proposed strip",
+                    len(catalog.removable))
 
     # Resume state — track processed thread IDs to skip on resume
     processed: set[str] = set()
@@ -450,7 +490,8 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
                 _apply_decisions(threads, decisions, whitelisted, label_ids,
                                  client, apply, log_fh, log_lock,
                                  counters, counters_lock,
-                                 reviewed_label=reviewed_label)
+                                 reviewed_label=reviewed_label,
+                                 forced_remove=forced_remove)
                 processed.update(t.thread_id for t in b)
                 actions_since_confirm += len(b)
             _checkpoint(state_file, processed)
@@ -521,8 +562,22 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
     "--log-file", type=click.Path(path_type=Path), default=None,
     help="Relabel log. Default: ./relabel.log.",
 )
+@click.option(
+    "--remove-label",
+    "remove_labels_forced",
+    metavar="NAME",
+    multiple=True,
+    help="Unconditionally strip label NAME from every thread relabel "
+         "touches. Repeatable. Issued in the same threads.modify as the "
+         "label move when one is needed, or as a standalone modify when "
+         "the label is unchanged. Pair with `removable:` in "
+         "config/labels.yaml for LLM-proposed strips (which require "
+         "--refetch-snippets to populate the thread's current labels). "
+         "Off when omitted.",
+)
 def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
-            concurrency, refetch_snippets, state_file, log_file):
+            concurrency, refetch_snippets, state_file, log_file,
+            remove_labels_forced):
     """Re-label already-kept emails against the current label catalog.
 
     Reads `keep` decisions from a prior decision log, re-asks the LLM to
@@ -581,6 +636,26 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
         missing = [n for n in catalog.auto_create if n not in label_ids]
         if missing:
             logger.info("--dry-run: would create labels: %s", ", ".join(missing))
+
+    # --remove-label resolution (same shape as classify).
+    forced_remove: list[tuple[str, str]] = []
+    for name in remove_labels_forced:
+        lid = label_ids.get(name)
+        if lid is None:
+            logger.warning(
+                "--remove-label %r is not a Gmail label in this account; "
+                "ignoring.", name)
+            continue
+        forced_remove.append((name, lid))
+    if forced_remove:
+        logger.info("forced --remove-label targets: %s",
+                    ", ".join(n for n, _ in forced_remove))
+    if catalog.removable and not refetch_snippets:
+        logger.info(
+            "labels.yaml `removable:` catalog is set but --refetch-snippets is "
+            "off; the relabel pass has no per-thread current-label list, so "
+            "LLM-proposed removals will all fail validation. Pass "
+            "--refetch-snippets to enable.")
 
     # Resume — relabel uses its own state file so it never collides with
     # the classify checkpoint.
@@ -646,6 +721,8 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                             {"id": r["id"], "label": r.get("label"), "_err": str(e)}
                             for r in buffer[idx]
                         ]
+            forced_remove_ids = [lid for _, lid in forced_remove]
+            forced_remove_names = [n for n, _ in forced_remove]
             for i, b in enumerate(buffer):
                 by_id = {r["id"]: r for r in b}
                 for d in results[i]:
@@ -662,11 +739,38 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                             _log_relabel(log_fh, rec, old_label, old_label, False,
                                          f"error: {err[:200]}")
                         continue
+                    # Combine forced + LLM-proposed removals (LLM-proposed
+                    # already filtered to catalog.removable + on-thread
+                    # by validate_relabel_decisions).
+                    llm_remove_names = list(d.get("remove_labels") or [])
+                    remove_names: list[str] = []
+                    seen: set[str] = set()
+                    for name in forced_remove_names + llm_remove_names:
+                        if name in seen:
+                            continue
+                        seen.add(name)
+                        remove_names.append(name)
                     changed = new_label != old_label
-                    if changed and apply:
-                        add_ids = [label_ids[new_label]] if new_label in label_ids else []
-                        remove_ids = [label_ids[old_label]] if old_label in label_ids else []
-                        if add_ids:
+                    if apply and (changed or remove_names):
+                        add_ids: list[str] = []
+                        remove_ids: list[str] = list(forced_remove_ids)
+                        if changed:
+                            if new_label in label_ids:
+                                add_ids.append(label_ids[new_label])
+                            else:
+                                logger.warning(
+                                    "new label %r has no Gmail id; logging only",
+                                    new_label)
+                            if old_label in label_ids:
+                                remove_ids.append(label_ids[old_label])
+                        for name in llm_remove_names:
+                            lid = label_ids.get(name)
+                            if lid and lid not in remove_ids:
+                                remove_ids.append(lid)
+                        # Skip empty modifies (can happen when new_label
+                        # has no Gmail id and no removals): treat as a
+                        # log-only event.
+                        if add_ids or remove_ids:
                             try:
                                 client.modify_thread_labels(
                                     rec["id"], add_label_ids=add_ids,
@@ -677,17 +781,17 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                                     counters["errors"] += 1
                                 with log_lock:
                                     _log_relabel(log_fh, rec, old_label, new_label, False,
-                                                 f"apply failed: {e}")
+                                                 f"apply failed: {e}",
+                                                 removed_labels=remove_names or None)
                                 continue
-                        else:
-                            logger.warning("new label %r has no Gmail id; logging only", new_label)
                     with counters_lock:
                         counters["changed" if changed else "unchanged"] += 1
                     with log_lock:
                         _log_relabel(log_fh, rec, old_label, new_label, changed,
-                                     "applied" if (changed and apply) else "")
+                                     "applied" if (changed and apply) else "",
+                                     removed_labels=remove_names or None)
                     processed.add(rec["id"])
-                    if changed and apply:
+                    if apply and (changed or remove_names):
                         actions_since_confirm += 1
             _checkpoint(state_file, processed)
             report_progress()
@@ -739,6 +843,7 @@ def _relabel_pure(
                     # prefer freshly-fetched sender/subject if the log truncated them
                     item["sender"] = meta.sender or item["sender"]
                     item["subject"] = meta.subject or item["subject"]
+                    item["current_labels"] = list(meta.current_labels)
             except Exception as e:
                 logger.warning("snippet refetch failed for %s: %s", rec["id"], e)
         llm_batch.append(item)
@@ -783,7 +888,8 @@ def _relabel_pure(
     return decisions
 
 
-def _log_relabel(fh, rec: dict, old_label, new_label, changed: bool, note: str):
+def _log_relabel(fh, rec: dict, old_label, new_label, changed: bool, note: str,
+                 removed_labels: list[str] | None = None):
     out = {
         "id": rec["id"],
         "from": rec.get("from", ""),
@@ -793,6 +899,8 @@ def _log_relabel(fh, rec: dict, old_label, new_label, changed: bool, note: str):
         "changed": changed,
         "note": note,
     }
+    if removed_labels:
+        out["removed_labels"] = list(removed_labels)
     fh.write(json.dumps(out, ensure_ascii=False) + "\n")
     fh.flush()
 
@@ -828,6 +936,7 @@ def _classify_pure(
                 "age_days": t.age_days,
                 "has_list_unsubscribe": t.has_list_unsubscribe,
                 "body": t.body,
+                "current_labels": list(t.current_labels),
             })
 
     decisions: list[dict] = []
@@ -880,6 +989,7 @@ def _apply_decisions(
     whitelisted: list[ThreadSummary], label_ids: dict[str, str], client,
     apply: bool, log_fh, log_lock, counters: dict, counters_lock,
     reviewed_label: str | None = None,
+    forced_remove: list[tuple[str, str]] | None = None,
 ) -> None:
     """Apply (or just log) decisions for one batch. Runs on the main
     thread — Gmail client isn't thread-safe and we want stable log
@@ -890,36 +1000,54 @@ def _apply_decisions(
     label, so future runs can filter it out. Trashed and errored emails
     are never given the reviewed label.
 
+    `forced_remove` is the resolved [(name, id), ...] list from
+    --remove-label: those labels are stripped from every kept and
+    whitelisted thread, regardless of LLM input. Trashed and errored
+    threads are skipped — trash hides labels anyway. LLM-proposed
+    removals come from each decision's optional `remove_labels` field
+    (already validated against catalog.removable + current_labels in
+    prompt.validate_decisions_strict) and stack with the forced ones.
+
     In `--apply` mode the decision is logged only AFTER the Gmail
     mutation is attempted. If the trash/label call raises, the whole
     record is logged as `action: "error"` (and counted as an error, not
     a keep/trash) so the log never claims a mutation that did not land,
     and `--retry-errors` can pick the thread up on a later run."""
     reviewed_id = label_ids.get(reviewed_label) if reviewed_label else None
+    forced_remove = forced_remove or []
+    forced_remove_ids = [lid for _, lid in forced_remove]
+    forced_remove_names = [name for name, _ in forced_remove]
 
-    # Whitelisted threads — emit KEEP-no-label decision. The only possible
-    # Gmail mutation is the optional reviewed-label.
+    # Whitelisted threads — emit KEEP-no-label decision. Possible Gmail
+    # mutations: the reviewed-label (add) + the forced-remove labels.
     for t in whitelisted:
         err: str | None = None
-        if apply and reviewed_id:
+        add_ids = [reviewed_id] if reviewed_id else []
+        if apply and (add_ids or forced_remove_ids):
             try:
-                client.modify_thread_labels(t.thread_id,
-                                            add_label_ids=[reviewed_id])
+                client.modify_thread_labels(
+                    t.thread_id,
+                    add_label_ids=add_ids,
+                    remove_label_ids=forced_remove_ids,
+                )
             except Exception as e:
                 err = str(e)
-                logger.error("reviewed-label failed for %s: %s", t.thread_id, e)
+                logger.error("modify failed for %s: %s", t.thread_id, e)
         if err is not None:
             with counters_lock:
                 counters["errors"] += 1
+            note = ("reviewed-label apply failed: " + err[:200]
+                    if reviewed_id and not forced_remove_ids
+                    else "modify failed: " + err[:200])
             with log_lock:
-                _log(log_fh, t, "error", None,
-                     f"reviewed-label apply failed: {err[:200]}")
+                _log(log_fh, t, "error", None, note)
         else:
             with counters_lock:
                 counters["whitelist"] += 1
             with log_lock:
                 _log(log_fh, t, "keep", None, "whitelist",
-                     reviewed_label=reviewed_label)
+                     reviewed_label=reviewed_label,
+                     removed_labels=forced_remove_names or None)
 
     by_id = {t.thread_id: t for t in batch}
     for d in decisions:
@@ -954,10 +1082,19 @@ def _apply_decisions(
                          "" if not apply else "applied")
         else:  # keep
             label = d.get("label")
+            # LLM-proposed strips (already validated against
+            # catalog.removable + current_labels) + forced strips,
+            # de-duplicated, preserving forced-first order.
+            llm_remove_names = list(d.get("remove_labels") or [])
+            remove_names: list[str] = []
+            seen: set[str] = set()
+            for name in forced_remove_names + llm_remove_names:
+                if name in seen:
+                    continue
+                seen.add(name)
+                remove_names.append(name)
             err = None
             if apply:
-                # Add the category label (if any) and the reviewed-label
-                # (if enabled) in a single threads.modify call.
                 add_ids: list[str] = []
                 if label:
                     lid = label_ids.get(label)
@@ -967,10 +1104,21 @@ def _apply_decisions(
                         logger.warning("label %r has no Gmail id; skipping", label)
                 if reviewed_id:
                     add_ids.append(reviewed_id)
-                if add_ids:
+                remove_ids: list[str] = []
+                for name in remove_names:
+                    lid = label_ids.get(name)
+                    if lid:
+                        remove_ids.append(lid)
+                    else:
+                        logger.warning("remove label %r has no Gmail id; skipping",
+                                       name)
+                if add_ids or remove_ids:
                     try:
-                        client.modify_thread_labels(t.thread_id,
-                                                    add_label_ids=add_ids)
+                        client.modify_thread_labels(
+                            t.thread_id,
+                            add_label_ids=add_ids,
+                            remove_label_ids=remove_ids,
+                        )
                     except Exception as e:
                         err = str(e)
                         logger.error("label failed for %s: %s", t.thread_id, e)
@@ -986,11 +1134,13 @@ def _apply_decisions(
                 with log_lock:
                     _log(log_fh, t, "keep", label,
                          "" if not apply else "applied",
-                         reviewed_label=reviewed_label)
+                         reviewed_label=reviewed_label,
+                         removed_labels=remove_names or None)
 
 
 def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str,
-         reviewed_label: str | None = None):
+         reviewed_label: str | None = None,
+         removed_labels: list[str] | None = None):
     rec = {
         "id": t.thread_id,
         "from": t.sender,
@@ -1001,6 +1151,8 @@ def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str,
     }
     if reviewed_label:
         rec["reviewed_label"] = reviewed_label
+    if removed_labels:
+        rec["removed_labels"] = list(removed_labels)
     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     fh.flush()
 

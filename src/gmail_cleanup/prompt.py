@@ -14,6 +14,12 @@ import yaml
 class LabelCatalog:
     existing: list[str] = field(default_factory=list)
     auto_create: dict[str, str] = field(default_factory=dict)  # name → description
+    # Labels the LLM may *propose* removing from a thread, with a short
+    # description of when they should be stripped. Independent of the
+    # keep-label catalog: a label here is one the user has retired or
+    # wants the model to retire opportunistically. Validation also
+    # requires the label to actually be on the thread.
+    removable: dict[str, str] = field(default_factory=dict)
 
     @property
     def all_keep_labels(self) -> list[str]:
@@ -25,6 +31,7 @@ class LabelCatalog:
         return cls(
             existing=list(d.get("existing", []) or []),
             auto_create=dict(d.get("auto_create", {}) or {}),
+            removable=dict(d.get("removable", {}) or {}),
         )
 
 
@@ -66,21 +73,29 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
 
       <label catalog with descriptions>
 
+      # Removable labels  (only when catalog.removable is non-empty)
+
+      <removable catalog with descriptions + opt-in remove_labels field>
+
       # Output format
 
       Return ONLY a single JSON object with key `decisions`, an array of
       one object per input email in the same order, each:
-        {"id": "<id>", "action": "keep"|"trash", "label": "<label or null>"}
+        {"id": "<id>", "action": "keep"|"trash", "label": "<label or null>",
+         "remove_labels": ["X", "Y"]}  # optional; only when removable catalog is on
 
       # Emails
 
-      [25 numbered entries]
+      [25 numbered entries — `Current labels:` line on each is included
+       when a thread actually carries any user-defined labels]
     """
     label_lines = []
     for name in catalog.existing:
         label_lines.append(f"- `{name}` (existing)")
     for name, desc in catalog.auto_create.items():
         label_lines.append(f"- `{name}` — {desc}")
+
+    removable_section = _build_removable_section(catalog)
 
     emails_block = []
     for i, e in enumerate(batch, 1):
@@ -92,6 +107,10 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
             meta_lines.append(f"Age: {age} days")
         if e.get("has_list_unsubscribe"):
             meta_lines.append("List-Unsubscribe: yes")
+        # Render current Gmail labels only when there are any AND the
+        # removable feature is in use — otherwise the line is noise.
+        if catalog.removable and e.get("current_labels"):
+            meta_lines.append("Current labels: " + ", ".join(e["current_labels"]))
         meta_str = "".join(f"{m}\n" for m in meta_lines)
         # Body is only included when --include-body was passed to classify;
         # otherwise the field is absent or empty, and we fall back to the
@@ -107,6 +126,12 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
             f"{body_section}"
         )
 
+    schema_example = (
+        '{"id": "...", "action": "keep", "label": "Receipts"'
+        + (', "remove_labels": ["LegacyTag"]' if catalog.removable else '')
+        + '},\n  {"id": "...", "action": "trash", "label": null}'
+    )
+
     return f"""{rules_md.strip()}
 
 # Available labels
@@ -116,15 +141,14 @@ list. If `action` is `trash`, set `label` to `null`. Pick exactly one
 label per kept email — no nesting, no comma-separated values.
 
 {chr(10).join(label_lines)}
-
+{removable_section}
 # Output format
 
 Return ONLY a JSON object with this exact structure (no prose, no markdown):
 
 ```json
 {{"decisions": [
-  {{"id": "...", "action": "keep", "label": "Receipts"}},
-  {{"id": "...", "action": "trash", "label": null}}
+  {schema_example}
 ]}}
 ```
 
@@ -136,6 +160,31 @@ the labels above (when keeping) or `null` (when trashing).
 # Emails to classify
 
 {chr(10).join(emails_block)}
+"""
+
+
+def _build_removable_section(catalog: LabelCatalog) -> str:
+    """The 'Removable labels' chunk of the prompt. Empty string when the
+    feature is off so the rest of the prompt stays unchanged byte-for-byte
+    with the pre-feature baseline. Used by both build_prompt and
+    build_relabel_prompt."""
+    if not catalog.removable:
+        return ""
+    lines = [f"- `{name}` — {desc}" for name, desc in catalog.removable.items()]
+    return f"""
+# Removable labels (optional)
+
+You MAY propose stripping any of these labels from an email by listing
+them in an OPTIONAL `remove_labels` array on the email's decision. Only
+list a label here when ALL of these are true:
+  1. The label appears in this catalog.
+  2. The label is in the email's `Current labels` line.
+  3. The label no longer fits the email (per its description below).
+
+If you have no strong reason, omit `remove_labels` entirely. Do NOT
+list category/keep labels here — only labels from this catalog.
+
+{chr(10).join(lines)}
 """
 
 
@@ -151,7 +200,11 @@ _DECISION_RE = re.compile(
 
 def parse_decisions(raw: str) -> list[dict]:
     """Parse the LLM response. Tries strict JSON first; falls back to
-    regex extraction if the model wraps in prose / markdown fences."""
+    regex extraction if the model wraps in prose / markdown fences.
+
+    Optional `remove_labels` (list of strings) is preserved on JSON
+    parses; the regex fallback drops it (recovery path is best-effort).
+    """
     import json
 
     # Strip common wrappers
@@ -203,6 +256,12 @@ def validate_decisions_strict(
     `missing_ids` is the set of input ids the LLM didn't decide on (or
     decided invalidly) — caller can re-prompt with just those to recover
     from the LLM-skipped-some-items failure mode.
+
+    Optional `remove_labels` on a decision is validated against the
+    catalog's `removable` set AND the batch item's `current_labels`.
+    Invalid entries are dropped with a warning; the decision is still
+    accepted (label removal is opt-in, not a correctness contract).
+    `remove_labels` is silently dropped on trash decisions.
     """
     valid_labels = set(catalog.all_keep_labels)
     by_id = {e["id"]: e for e in batch}
@@ -227,10 +286,49 @@ def validate_decisions_strict(
             continue
         if action == "trash":
             label = None
+        remove_labels = _filter_remove_labels(
+            d.get("remove_labels"), by_id[eid], catalog,
+            action, eid, errors)
         seen_ids.add(eid)
-        out.append({"id": eid, "action": action, "label": label})
+        decision: dict = {"id": eid, "action": action, "label": label}
+        if remove_labels:
+            decision["remove_labels"] = remove_labels
+        out.append(decision)
     missing_ids = set(by_id.keys()) - seen_ids
     return out, missing_ids, errors
+
+
+def _filter_remove_labels(
+    proposed, batch_item: dict, catalog: LabelCatalog,
+    action: str, eid: str, errors: list[str],
+) -> list[str]:
+    """Filter a model-proposed remove_labels array down to the entries
+    that are (a) listed in catalog.removable and (b) actually on the
+    thread per batch_item['current_labels']. Trash decisions get a
+    silent skip — Gmail's trash already hides labels. Returns the
+    cleaned list (possibly empty)."""
+    if not proposed or not isinstance(proposed, list):
+        return []
+    if action == "trash":
+        return []
+    catalog_set = set(catalog.removable.keys())
+    on_thread = set(batch_item.get("current_labels") or [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in proposed:
+        if not isinstance(name, str) or name in seen:
+            continue
+        seen.add(name)
+        if name not in catalog_set:
+            errors.append(
+                f"id={eid}: remove_label {name!r} not in removable catalog")
+            continue
+        if name not in on_thread:
+            # Not an error — model may not see the freshest label state.
+            # Drop silently to keep prompt noise down.
+            continue
+        out.append(name)
+    return out
 
 
 # ---------------- relabel-only pass ----------------
@@ -244,13 +342,17 @@ def validate_decisions_strict(
 
 def build_relabel_prompt(catalog: LabelCatalog, batch: list[dict]) -> str:
     """Render a label-only prompt. Each batch item is a dict with keys
-    `id`, `sender`, `subject`, and optionally `snippet` and
-    `current_label`. The model returns one label per email."""
+    `id`, `sender`, `subject`, and optionally `snippet`,
+    `current_label`, and `current_labels` (all Gmail labels on the
+    thread, used only when the removable catalog is on). The model
+    returns one label per email plus an optional `remove_labels`."""
     label_lines = []
     for name in catalog.existing:
         label_lines.append(f"- `{name}` (existing)")
     for name, desc in catalog.auto_create.items():
         label_lines.append(f"- `{name}` — {desc}")
+
+    removable_section = _build_removable_section(catalog)
 
     emails_block = []
     for i, e in enumerate(batch, 1):
@@ -259,7 +361,15 @@ def build_relabel_prompt(catalog: LabelCatalog, batch: list[dict]) -> str:
             lines.append(f"Snippet: {e['snippet'][:300]}")
         if e.get("current_label"):
             lines.append(f"Current label: {e['current_label']}")
+        if catalog.removable and e.get("current_labels"):
+            lines.append("Current labels: " + ", ".join(e["current_labels"]))
         emails_block.append("\n".join(lines) + "\n")
+
+    schema_example = (
+        '{"id": "...", "label": "Receipts"'
+        + (', "remove_labels": ["LegacyTag"]' if catalog.removable else '')
+        + '},\n  {"id": "...", "label": "Travel"}'
+    )
 
     return f"""You are an email-organizing assistant. Every email below has
 already been reviewed and is being KEPT — you are NOT deciding whether to
@@ -274,15 +384,14 @@ choose a different label when another one clearly fits better (for
 example, a newly added category that is a tighter match).
 
 {chr(10).join(label_lines)}
-
+{removable_section}
 # Output format
 
 Return ONLY a JSON object with this exact structure (no prose, no markdown):
 
 ```json
 {{"decisions": [
-  {{"id": "...", "label": "Receipts"}},
-  {{"id": "...", "label": "Travel"}}
+  {schema_example}
 ]}}
 ```
 
@@ -330,9 +439,15 @@ def validate_relabel_decisions(
     decisions: list[dict], batch: list[dict], catalog: LabelCatalog
 ) -> tuple[list[dict], set[str], list[str]]:
     """Strict relabel validator. Returns (good, missing_ids, errors).
-    `good` entries are {id, label} with label guaranteed to be in the
-    catalog. Caller re-prompts missing ids, then falls back to keeping
-    each missing email's existing label (never drops a label)."""
+    `good` entries are {id, label} (with optional `remove_labels`) and
+    label is guaranteed to be in the catalog. Caller re-prompts missing
+    ids, then falls back to keeping each missing email's existing label
+    (never drops a label).
+
+    Optional `remove_labels` validated the same way as in classify:
+    must be in `catalog.removable` AND in the batch item's
+    `current_labels`. Invalid entries dropped.
+    """
     valid_labels = set(catalog.all_keep_labels)
     by_id = {e["id"]: e for e in batch}
     seen_ids: set[str] = set()
@@ -350,7 +465,13 @@ def validate_relabel_decisions(
         if label not in valid_labels:
             errors.append(f"id={eid}: unknown label {label!r}")
             continue
+        remove_labels = _filter_remove_labels(
+            d.get("remove_labels"), by_id[eid], catalog,
+            "keep", eid, errors)
         seen_ids.add(eid)
-        out.append({"id": eid, "label": label})
+        entry: dict = {"id": eid, "label": label}
+        if remove_labels:
+            entry["remove_labels"] = remove_labels
+        out.append(entry)
     missing_ids = set(by_id.keys()) - seen_ids
     return out, missing_ids, errors
