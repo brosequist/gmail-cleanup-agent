@@ -23,13 +23,18 @@ For each email, only:
   presence of the RFC 2369 header. The header *value* (which can
   contain mailto: links or one-click URLs) is **not** sent.
 
+- **Current labels** — the names of the thread's user labels, but
+  only when `labels.yaml` has a `removable:` section (the model needs
+  them to propose a strip). Otherwise no label names are sent.
+
 The **full message body is NOT sent** unless you explicitly pass
 `--include-body`. When set, the classifier fetches the first
 message's `text/plain` part (falling back to `text/html` with tags
-stripped) and includes up to 4 KB per email in the prompt. Off by
-default — snippet alone is enough for the marketing-vs-personal
-call this tool is making, and `--include-body` roughly triples
-per-email prompt size on cloud backends.
+stripped) and includes up to 4 KB per email in the prompt, **in
+addition to** the snippet. Off by default — snippet alone is enough
+for the marketing-vs-personal call this tool is making. A full 4 KB
+body is ~700 extra tokens per email, so a batch can be ~3.5× the
+snippet-only size (see [cost-math.md](cost-math.md#per-batch-token-sizing)).
 
 Threads are processed independently — no conversation history is sent
 across calls.
@@ -77,7 +82,11 @@ go depends entirely on `OPENAI_BASE_URL`:
 
 ## What is stored locally
 
-The tool writes the following files in the repo's working directory:
+Configuration lives in the config directory (`$GMAIL_CLEANUP_CONFIG_DIR`,
+else `./config`; `/config` in the Docker image). Run artifacts go to
+the working directory (`$GMAIL_CLEANUP_WORK_DIR`, else the current
+directory; `/work` in the Docker image). Row formats are in the
+README under [Files the tool writes](../README.md#files-the-tool-writes).
 
 | File | Contents | Sensitive? |
 |---|---|---|
@@ -86,14 +95,15 @@ The tool writes the following files in the repo's working directory:
 | `config/labels.yaml` | Your label catalog | no |
 | `config/rules.md` | Your classification rules | no |
 | `config/whitelist.txt` | Sender addresses to never trash | varies |
-| `state.json` | Classify resume checkpoint (processed thread IDs) | no |
+| `config/backend.env` | Backend selection + API keys for cloud providers | yes — keep out of git |
+| `state.json`, `state-dry-run.json` | `classify` resume checkpoints (`--apply` / dry run): thread IDs | no |
+| `relabel-state.json`, `relabel-state-dry-run.json` | `relabel` resume checkpoints | no |
 | `state-applied.json` | `apply-log` resume checkpoint (applied thread IDs) | no |
-| `relabel-state.json` | `relabel` resume checkpoint | no |
 | `dry-run.log` | Per-email decisions from a `--dry-run` pass | yes — contains subjects + senders |
-| `applied.log` | Per-email actions actually taken | yes |
+| `applied.log` | Per-email actions actually taken (`classify --apply`, and `apply-log --apply`'s audit rows) | yes |
 | `replay-preview.log` | Output of `apply-log --dry-run` | yes |
 | `relabel.log` | Output of `relabel` | yes |
-| `config/backend.env` | Backend selection + API keys for cloud providers | yes — keep out of git |
+| the `--console-log` file, if you pass one | The console log: progress, thread IDs, label names and error messages | low — no subjects or senders |
 
 The `.gitignore` excludes the sensitive ones from accidental commits.
 **Never commit `credentials.json` or `token.json`** — both grant access
@@ -117,7 +127,9 @@ It does NOT request:
 
 ## Audit trail
 
-Every state-changing action is logged to `applied.log` with timestamp,
-thread ID, sender, subject, action, and reason. If something goes wrong
-(or just looks wrong in retrospect), you can reconstruct exactly what the
-tool did and recover from Gmail's trash.
+Every state-changing action is logged to `applied.log` with the thread
+ID, sender, subject, action, the labels applied or removed, and a short
+note. Rows carry no individual timestamp and no model reasoning; each
+run is bracketed by timestamped `=== … ===` header lines instead. If
+something goes wrong (or just looks wrong in retrospect), you can
+reconstruct exactly what the tool did and recover from Gmail's trash.

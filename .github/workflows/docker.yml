@@ -7,7 +7,7 @@ name: publish-docker
 #   ghcr.io/brosequist/gmail-llm-cleanup:<tag>     (e.g. :v1.1.0)
 #   ghcr.io/brosequist/gmail-llm-cleanup:<version> (e.g. :1.1.0)
 #   ghcr.io/brosequist/gmail-llm-cleanup:1.1
-#   ghcr.io/brosequist/gmail-llm-cleanup:latest    (on default-branch builds)
+#   ghcr.io/brosequist/gmail-llm-cleanup:latest    (tag builds only)
 
 on:
   push:
@@ -45,7 +45,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/gmail-llm-cleanup
-          # See docs/image-tagging.md for the full set; in short:
+          # Documented in README.md -> "Docker image tags"; in short:
           #   v1.2.3 -> :v1.2.3, :1.2.3, :1.2, :latest
           tags: |
             type=ref,event=tag

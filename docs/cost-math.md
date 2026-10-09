@@ -30,45 +30,70 @@ This doc shows the inputs so you can plug in your own. See
 
 ## Per-batch token sizing
 
-Measured by running the actual `build_prompt()` against the shipped
-`config/rules.example.md` + `config/labels.example.yaml` (so you can
-reproduce these numbers) and a 20-email batch with realistic sender /
-subject / snippet lengths. Character count ÷ 4 ≈ tokens for English:
+Re-measured on the 1.4 prompt (one-or-two-label contract), 2026-10-09.
+The prompt is the real `build_prompt()` output for the shipped
+`config/rules.example.md` + `config/labels.example.yaml`, with a
+20-email batch of realistic sender / subject lengths and full
+~200-character snippets. Tokens were counted with two real
+tokenizers rather than estimated from characters:
 
-| Item | ~tokens |
-|---|---|
-| Fixed prefix (rules + label catalog + JSON-format instructions) | 1,300 |
-| Per email (id + sender + subject + snippet, formatted) | 106 |
-| **Total input per batch of 20** | **~3,400** |
-| **Output per batch of 20** (`{"decisions":[...]}`) | **~200** |
+- **`o200k_base`** (via `tiktoken`) — exact for GPT-4o / GPT-4.1
+  family models, and the figure used for the cost table below.
+- **Qwen3** (the `Qwen/Qwen3-8B` tokenizer, via `tokenizers`) — what a
+  local Qwen model actually sees; a few percent higher.
 
-For 312,262 threads at batch size 20 = 15,613 batches:
+Claude and Gemini use their own tokenizers, so treat their rows as
+estimates.
 
-- **Total input tokens:** 15,613 × 3,400 ≈ **53.1M**
-- **Total output tokens:** 15,613 × 200 ≈ **3.1M**
+| Item | o200k | Qwen3 |
+|---|---:|---:|
+| Fixed prefix (rules + label catalog + output-format instructions) | 3,517 | 3,580 |
+| Per email (id + sender + subject + age + flags + snippet) | ~103 | ~115 |
+| **Total input per batch of 20** | **5,586** | **5,888** |
+| **Output per batch of 20** (`{"decisions":[...]}`, compact JSON) | **~530** | ~630 |
 
-If your own `rules.md` is longer or shorter than the example, expect
-the prefix-per-batch (and total cost) to scale roughly linearly. My
-actual run with a longer rules file landed closer to ~$75 on Haiku
-instead of the $69 below.
+The prefix is about 63 % of every batch's input, and it is identical
+across batches. That is why the prefix size matters more than anything
+else: a longer `rules.md` raises every batch's cost by the same amount.
+1.4's longer output-format section (the two-label rules) is most of the
+growth over the 1.3 figures, alongside the per-email `Age:` and
+`List-Unsubscribe:` lines.
+
+With `--include-body` and bodies at the full 4 KB cap, the per-email
+cost rises to **~810 tokens** (o200k), so a batch of 20 is about
+19,700 tokens, roughly **3.5×** a snippet-only batch. Short bodies cost
+proportionally less.
+
+For 312,262 threads at batch size 20 = 15,614 batches:
+
+- **Total input tokens:** 15,614 × 5,586 ≈ **87.2M**
+- **Total output tokens:** 15,614 × 530 ≈ **8.3M**
+
+If your own `rules.md` is longer or shorter than the example, the
+prefix (and total cost) scales roughly linearly with it.
 
 ## Cloud API cost estimates
 
-Using published rates as of early 2026; you should re-check current
-pricing before quoting these:
+Using published rates as of early 2026; re-check current pricing
+before quoting these:
 
 | Backend | $/MTok in | $/MTok out | Input cost | Output cost | **Total** |
 |---|---|---|---|---|---|
-| Claude Haiku 4.5 | $1.00 | $5.00 | $53.10 | $15.55 | **~$69** |
-| GPT-4.1-mini | $0.40 | $1.60 | $21.24 | $4.98 | **~$26** |
-| GPT-4o-mini | $0.15 | $0.60 | $7.97 | $1.87 | **~$10** |
-| Gemini 2.0 Flash | $0.10 | $0.40 | $5.31 | $1.25 | **~$7** |
+| Claude Haiku 4.5 | $1.00 | $5.00 | $87.20 | $41.50 | **~$129** |
+| GPT-4.1-mini | $0.40 | $1.60 | $34.88 | $13.28 | **~$48** |
+| GPT-4o-mini | $0.15 | $0.60 | $13.08 | $4.98 | **~$18** |
+| Gemini 2.0 Flash | $0.10 | $0.40 | $8.72 | $3.32 | **~$12** |
 
-These are full-price; in practice you'd also benefit from prompt
-caching on the fixed prefix (the rules + label catalog are the same
-across every batch in a run), which would knock another ~30–40% off
-the input cost on providers that support it (Claude, OpenAI). With
-caching, Haiku drops to ~$50, GPT-4o-mini to ~$7-8.
+These are full-price. The `claude` backend does not request Anthropic
+prompt caching, so no caching discount applies there. Providers that
+cache repeated prompt prefixes automatically (OpenAI does, above a
+minimum prompt length) will bill the ~3,500-token prefix at their
+cached-input rate on most batches, which can take a large share off
+the input column; check your provider's current cached-input price.
+
+The reasoning-model caveat applies to local runs too: a model that
+"thinks" before answering emits far more output tokens than the table
+assumes. See [llama-server-setup.md](llama-server-setup.md).
 
 ## Local-LLM electricity estimate
 

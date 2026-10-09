@@ -2,10 +2,12 @@
 #
 # `existing` — labels that already exist in your Gmail. The classifier
 #              will use these where applicable but won't create them.
-# `auto_create` — categories you want for important emails. The classifier
-#              will create these labels in your Gmail the first time
-#              they're applied. Each entry has a one-line description
-#              that goes into the LLM prompt to guide classification.
+# `auto_create` — categories you want for important emails. Any that are
+#              missing from Gmail are created at the start of every
+#              `--apply` run (a dry run only lists them). Each entry has
+#              a one-line description that goes into the LLM prompt to
+#              guide classification -- write it as a quoted value; a YAML
+#              comment after the name leaves the description empty.
 # `removable` — OPTIONAL. Labels the LLM may *propose* stripping from a
 #              kept email when they no longer apply. The prompt grows
 #              by a "Removable labels" section + a "Current labels:"
