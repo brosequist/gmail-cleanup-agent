@@ -47,21 +47,23 @@ existing:
 
 auto_create:
   Family: "personal correspondence from friends or family members"
-  Receipts: "order confirmations, purchase receipts, shipping notifications with tracking, refund confirmations — short-retention transactional records (NOT recurring monthly/quarterly statements — those go to Statements)"
-  Statements: "monthly/quarterly account statements from banks, credit cards, brokerages, utilities — long-retention financial records (NOT one-off purchase receipts — those go to Receipts)"
-  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results, insurance EOBs — NOT generic health-tip newsletters or pharmacy coupons"
+  Receipts: "one-off purchase records: order confirmations, invoices, payment receipts, shipping/tracking, refund confirmations. NOT recurring account statements (use Statements) and NOT insurance bills (use Insurance)"
+  Statements: "recurring account statements AND any bill you owe: banks, credit cards, brokerages, loan servicers (the periodic statement itself), plus utility, phone, internet and other recurring service bills. A bill is never a Receipt (one-off purchases already paid) and a utility bill is never Home. Exceptions: insurance premium bills go in Insurance, and a renewal reminder with no amount due stays in Subscriptions"
+  Medical: "detailed emails from doctors, hospitals, pharmacies, lab results — NOT generic health-tip newsletters or pharmacy coupons; health-insurance EOBs go in Insurance"
+  Insurance: "insurance policies, premium bills, claim updates, and EOBs (explanation of benefits) — auto, home, life, and health insurance"
+  Home: "running the house: contractor and trade quotes, bids, scheduling and completion notices (electricians, plumbers, landscapers, carpenters), utility service mail (outages, appointments, meter visits, rate changes), and in-home organization, cleaning and repair tasks. Utility BILLS go in Statements, not here; home insurance goes in Insurance"
   School: "emails from schools, teachers, university registrars, tuition platforms — NOT educational marketing or course-launch promos"
   Sports: "league registrations, team schedules, coach updates, sports event tickets you bought — NOT sports news/commentary newsletters"
   Organizations: "community groups, professional associations, volunteer organizations you are personally a member of — NOT marketing from groups you don't belong to"
   Government: "communications from DMV, tax authorities (IRS, state), immigration, voter registration, courts, social security — NOT campaign/political fundraising"
+  Travel: "flight, train, hotel, and car-rental itineraries, boarding passes, and trip reservation confirmations — NOT travel deal newsletters"
   Registrations: "event registration confirmations, account creation confirmations, program enrollments — confirmations of things you completed, NOT 'register soon!' recurring digests"
+  Subscriptions: "subscription renewal notifications and plan-change notices for recurring services — NOT subscription marketing"
 
 # Optional labels — uncomment those you actually use. These appeared in
 # the example real-world run; yours may differ.
 #
-#  Travel: "booked trips: flight/hotel confirmations, itineraries, boarding passes — NOT travel deal newsletters"
-#  Insurance: "policy documents, claim correspondence, coverage updates from auto/home/health/life insurers"
-#  Subscriptions: "active subscription account state (renewals, billing changes, cancellations) — NOT subscription marketing"
+#  Pets: "veterinary exam and lab results, medical-event reports, vaccination and prescription notices, and messages from pet daycare, boarding, grooming or walking providers about your animals. NOT pet-supply purchases (use Receipts) and NOT vet marketing"
 #  Veterans: "VA correspondence, military service organizations, veteran benefit notices — only useful if you're a veteran"
 #  Daycare: "daycare/preschool daily reports, billing, communications from caregivers — only useful if you're a parent"
 
