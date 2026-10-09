@@ -202,3 +202,30 @@ def test_classify_retry_errors_with_no_log_file_is_graceful(tmp_path,
     # Log was written normally
     rows = _read_log(log_path)
     assert {r["id"] for r in rows} == {"g1"}
+
+
+def test_version_flag_prints_package_version():
+    """`--version` reports the installed package version (the one tagged
+    and released), so bug reports name the right release."""
+    from gmail_cleanup import __version__
+
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == f"gmail-cleanup, version {__version__}"
+
+
+def test_auth_reports_resolved_token_path(tmp_path, monkeypatch):
+    """auth must print where the token actually went: with
+    GMAIL_CLEANUP_CONFIG_DIR set (as Docker does) that is NOT
+    config/token.json."""
+    cfg = tmp_path / "elsewhere"
+    monkeypatch.setenv("GMAIL_CLEANUP_CONFIG_DIR", str(cfg))
+    calls = []
+    monkeypatch.setattr(cli_module.GmailClient, "authorize",
+                        lambda self, force=False: calls.append(force))
+
+    result = CliRunner().invoke(cli, ["auth"])
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert f"token saved to {cfg / 'token.json'}" in result.output
+    assert "config/token.json" not in result.output
