@@ -325,3 +325,33 @@ def test_relabel_reordered_labels_are_not_a_change(tmp_path, patched):
     assert result.exit_code == 0, result.output
     assert patched["client"].modified == []
     assert _relabel_rows(tmp_path)[0]["changed"] is False
+
+
+def test_relabel_dry_run_then_apply_uses_separate_state(tmp_path, patched):
+    """As in classify: a dry run's resume state must not make --apply
+    skip the emails it only proposed changes for."""
+    src = tmp_path / "src.log"
+    _write_log(src, [
+        {"id": "t1", "from": "a", "subject": "s",
+         "action": "keep", "label": "Family"},
+    ])
+    patched["backend_responses"] = [json.dumps({"decisions": [
+        {"id": "t1", "label": "Receipts"},
+    ]})]
+    base = ["relabel", "--input-log", str(src), "--concurrency", "1",
+            "--confirm-every", "0"]
+    runner = CliRunner()
+
+    assert runner.invoke(cli, base + ["--dry-run"]).exit_code == 0
+    dry = json.loads((tmp_path / "relabel-state-dry-run.json").read_text())
+    assert dry == {"mode": "dry-run", "processed": ["t1"]}
+
+    result = runner.invoke(cli, base + ["--apply"])
+    assert result.exit_code == 0, result.output
+    assert [m["id"] for m in patched["client"].modified] == ["t1"]
+
+    # Pointing --apply at the dry run's file explicitly is refused.
+    result = runner.invoke(cli, base + [
+        "--apply", "--state-file", str(tmp_path / "relabel-state-dry-run.json")])
+    assert result.exit_code == 2
+    assert "is resume state from a dry-run run" in result.output

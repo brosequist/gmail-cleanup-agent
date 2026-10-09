@@ -321,8 +321,9 @@ class GmailClient:
     ) -> Iterator[ThreadSummary]:
         """Yield ThreadSummary objects matching the query. Handles
         pagination transparently. Reads only the first message of each
-        thread (which is what's useful for triage). Stops at max_threads
-        if set.
+        thread (which is what's useful for triage). Stops after
+        max_threads NEW threads if set: resume-skipped placeholders (see
+        below) don't count, so a resumed `--limit N` still processes N.
 
         If `skip_ids` is provided, threads whose ID is in the set are
         yielded as bare placeholders (empty sender/subject/date) so the
@@ -354,9 +355,6 @@ class GmailClient:
                     yield ThreadSummary(
                         thread_id=tid, sender="", subject="", snippet="", date="",
                     )
-                    yielded += 1
-                    if max_threads and yielded >= max_threads:
-                        return
                     continue
                 # Fetch first message metadata (cheaper than full thread).
                 # `format=full` is required to get body parts; metadata-only

@@ -151,7 +151,9 @@ def auth():
     "--state-file",
     type=click.Path(path_type=Path),
     default=None,
-    help="Resume checkpoint of processed thread IDs. Default: ./state.json.",
+    help="Resume checkpoint of processed thread IDs. Default: ./state.json "
+         "under --apply, ./state-dry-run.json otherwise. A state file "
+         "written by the other mode is refused.",
 )
 @click.option(
     "--log-file",
@@ -248,10 +250,15 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
 
     work = _work_root()
     cfg = _resolve_config_dir()
+    # Dry-run and --apply keep separate resume state, like their logs:
+    # a thread a dry run only looked at is still untouched in Gmail, so
+    # --apply must not skip it.
     if state_file is None:
-        state_file = work / "state.json"
+        state_file = work / ("state.json" if apply else "state-dry-run.json")
     if log_file is None:
         log_file = work / ("applied.log" if apply else "dry-run.log")
+    # Read (and mode-check) the resume state before touching Gmail.
+    processed = _load_state(state_file, apply, "threads already processed")
 
     # --reviewed-label / --skip-label — both opt-in, unset by default.
     # The reviewed-label name (default "Reviewed" when the flag is given
@@ -375,16 +382,6 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
         logger.info("removable catalog: %d labels available for LLM-proposed strip",
                     len(catalog.removable))
 
-    # Resume state — track processed thread IDs to skip on resume
-    processed: set[str] = set()
-    if state_file.exists():
-        try:
-            sd = json.loads(state_file.read_text())
-            processed = set(sd.get("processed", []))
-            logger.info("resuming: %d threads already processed", len(processed))
-        except Exception:
-            logger.warning("could not read state file %s; starting fresh", state_file)
-
     # --retry-errors: re-classify threads whose most recent decision in the
     # log file was action=="error". The log is append-mode JSONL across
     # runs, so an ID may have multiple records — only the LATEST matters
@@ -496,7 +493,7 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
                                  forced_remove=forced_remove)
                 processed.update(t.thread_id for t in b)
                 actions_since_confirm += len(b)
-            _checkpoint(state_file, processed)
+            _checkpoint(state_file, processed, apply)
             report_progress()
             batch_buffer.clear()
             maybe_confirm()
@@ -558,7 +555,9 @@ def classify(query, limit, batch_size, llm_retries, apply, confirm_every,
 )
 @click.option(
     "--state-file", type=click.Path(path_type=Path), default=None,
-    help="Resume checkpoint of relabeled IDs. Default: ./relabel-state.json.",
+    help="Resume checkpoint of relabeled IDs. Default: ./relabel-state.json "
+         "under --apply, ./relabel-state-dry-run.json otherwise. A state "
+         "file written by the other mode is refused.",
 )
 @click.option(
     "--log-file", type=click.Path(path_type=Path), default=None,
@@ -593,10 +592,12 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
     cfg = _resolve_config_dir()
     if input_log is None:
         input_log = work / "dry-run.log"
-    if state_file is None:
-        state_file = work / "relabel-state.json"
+    if state_file is None:  # per mode, as in classify
+        state_file = work / ("relabel-state.json" if apply
+                             else "relabel-state-dry-run.json")
     if log_file is None:
         log_file = work / "relabel.log"
+    processed = _load_state(state_file, apply, "emails already relabeled")
 
     catalog = LabelCatalog.load(cfg / "labels.yaml")
     backend = get_backend()
@@ -659,16 +660,8 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
             "LLM-proposed removals will all fail validation. Pass "
             "--refetch-snippets to enable.")
 
-    # Resume — relabel uses its own state file so it never collides with
-    # the classify checkpoint.
-    processed: set[str] = set()
-    if state_file.exists():
-        try:
-            processed = set(json.loads(state_file.read_text()).get("processed", []))
-            logger.info("resuming: %d emails already relabeled", len(processed))
-        except Exception:
-            logger.warning("could not read %s; starting fresh", state_file)
-
+    # Resume — relabel uses its own state file (loaded above) so it never
+    # collides with the classify checkpoint.
     work = [rec for rid, rec in kept.items() if rid not in processed]
     logger.info("%d emails to relabel (%d skipped from resume state)",
                 len(work), len(kept) - len(work))
@@ -803,7 +796,7 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                     processed.add(rec["id"])
                     if apply and (changed or remove_names):
                         actions_since_confirm += 1
-            _checkpoint(state_file, processed)
+            _checkpoint(state_file, processed, apply)
             report_progress()
             buffer.clear()
             maybe_confirm()
@@ -1183,8 +1176,43 @@ def _log(fh, t: ThreadSummary, action: str, labels: list[str] | None, note: str,
     fh.flush()
 
 
-def _checkpoint(state_file: Path, processed: set[str]) -> None:
-    state_file.write_text(json.dumps({"processed": sorted(processed)}))
+def _mode(apply: bool) -> str:
+    return "apply" if apply else "dry-run"
+
+
+def _load_state(state_file: Path, apply: bool, what: str) -> set[str]:
+    """Thread IDs to skip on resume. The file records the mode that wrote
+    it; one from the other mode is refused, because resuming across modes
+    is always wrong: --apply would skip threads a dry run never changed,
+    and a dry run would mark them done for a later --apply. A file with no
+    mode (1.4 and earlier) loads as before."""
+    if not state_file.exists():
+        return set()
+    try:
+        sd = json.loads(state_file.read_text())
+    except Exception:
+        logger.warning("could not read state file %s; starting fresh", state_file)
+        return set()
+    recorded, mode = sd.get("mode"), _mode(apply)
+    if recorded is not None and recorded != mode:
+        why = ("--apply would skip every thread the dry run only looked at, "
+               "leaving them unchanged in Gmail"
+               if apply else
+               "this dry run would record threads as done that --apply "
+               "later skips without changing them")
+        raise click.UsageError(
+            f"{state_file} is resume state from a {recorded} run, and this "
+            f"is a {mode} run: {why}. Pass a different --state-file, or "
+            f"omit it to use this mode's default.")
+    processed = set(sd.get("processed", []))
+    if processed:
+        logger.info("resuming: %d %s", len(processed), what)
+    return processed
+
+
+def _checkpoint(state_file: Path, processed: set[str], apply: bool) -> None:
+    state_file.write_text(json.dumps({"mode": _mode(apply),
+                                      "processed": sorted(processed)}))
 
 
 @cli.command(name="apply-log", context_settings={"max_content_width": 100})

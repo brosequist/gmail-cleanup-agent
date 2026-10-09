@@ -181,3 +181,21 @@ def test_search_threads_max_threads_caps_results():
     out = list(client.search_threads("q", max_threads=3))
     assert len(out) == 3
     assert [t.thread_id for t in out] == ["t0", "t1", "t2"]
+
+
+def test_search_threads_max_threads_counts_only_new_threads():
+    """Resume-skipped placeholders don't count towards max_threads, so a
+    resumed `--limit N` run still yields N new threads (it used to yield
+    the N already-processed placeholders and stop)."""
+    page = {"threads": [
+        {"id": f"t{i}", "snippet": "s"} for i in range(6)
+    ]}
+    msg_responses = {f"t{i}": _MessagesGet() for i in range(6)}
+    svc = _Service(_Threads(page, msg_responses), _Messages(msg_responses))
+    client = _make_client(svc)
+
+    out = list(client.search_threads("q", max_threads=2,
+                                     skip_ids={"t0", "t1", "t2"}))
+    new = [t.thread_id for t in out if t.sender]
+    assert new == ["t3", "t4"]
+    assert [t.thread_id for t in out] == ["t0", "t1", "t2", "t3", "t4"]
