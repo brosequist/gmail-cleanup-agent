@@ -252,3 +252,49 @@ def test_execute_with_retry_persistent_429_falls_through(tmp_path: Path, monkeyp
 
     assert successful == set()
     assert counters["error"] == 1
+
+
+# ---------------- 1.4: two-label rows + v1.3.0 compatibility ----------------
+
+
+def test_load_latest_decisions_reads_v130_and_v140_rows(tmp_path: Path):
+    """A log can mix v1.3.0 rows (scalar `label`) and 1.4 rows (`labels`
+    array + `label` mirror); both load and resolve to their labels."""
+    log = tmp_path / "dry-run.log"
+    log.write_text(
+        '{"id":"old","action":"keep","label":"Receipts","note":""}\n'
+        + '{"id":"new","action":"keep","labels":["Family","Receipts"],'
+          '"label":"Family","note":""}\n'
+    )
+    decs = load_latest_decisions(log)
+    assert _keep_label_names(decs["old"]) == ["Receipts"]
+    assert _keep_label_names(decs["new"]) == ["Family", "Receipts"]
+
+
+def test_keep_label_names_two_labels_plus_reviewed():
+    assert _keep_label_names(
+        {"labels": ["Family", "Receipts"], "reviewed_label": "Reviewed"}
+    ) == ["Family", "Receipts", "Reviewed"]
+
+
+def test_execute_with_retry_applies_both_labels_and_audits_them(tmp_path: Path):
+    items = [{"id": "k1", "action": "keep", "labels": ["Receipts", "Family"],
+              "label": "Receipts"}]
+    label_ids = {"Receipts": "Label_1", "Family": "Label_2"}
+    counters: Counter[str] = Counter()
+    audit_path = tmp_path / "audit.log"
+    audit = audit_path.open("w")
+    bx = _BatchExec([{"k1": (None, None)}])
+    svc = _FakeService(bx)
+
+    successful = _execute_with_retry(
+        svc, items, label_ids, audit, counters,
+        {d["id"]: d for d in items}, batch_idx=1,
+    )
+    audit.close()
+
+    assert successful == {"k1"}
+    assert svc.modified == [("k1", {"addLabelIds": ["Label_1", "Label_2"]})]
+    rec = json.loads(audit_path.read_text().strip())
+    assert rec["labels"] == ["Receipts", "Family"]
+    assert rec["label"] == "Receipts"           # v1.3.0 readers still work

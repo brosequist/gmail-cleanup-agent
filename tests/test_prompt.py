@@ -197,7 +197,8 @@ def test_validate_decisions_strict_trash_nulls_label(catalog):
     # Model returned a stray label on a trash decision — should be nulled out.
     decs = [{"id": "a", "action": "trash", "label": "Receipts"}]
     good, _, _ = validate_decisions_strict(decs, batch, catalog)
-    assert good == [{"id": "a", "action": "trash", "label": None}]
+    # 1.4: `labels` is the field; `label` stays as its legacy mirror.
+    assert good == [{"id": "a", "action": "trash", "labels": [], "label": None}]
 
 
 def test_validate_decisions_lenient_defaults_missing_to_keep(catalog):
@@ -205,7 +206,7 @@ def test_validate_decisions_lenient_defaults_missing_to_keep(catalog):
     decs = [{"id": "a", "action": "keep", "label": "Receipts"}]
     out, errs = validate_decisions(decs, batch, catalog)
     by_id = {d["id"]: d for d in out}
-    assert by_id["b"] == {"id": "b", "action": "keep", "label": None}
+    assert by_id["b"] == {"id": "b", "action": "keep", "labels": [], "label": None}
     assert any("defaulted to keep" in e for e in errs)
 
 
@@ -385,3 +386,131 @@ def test_build_relabel_prompt_renders_removable_section(removable_catalog):
     assert "Removable labels" in out
     assert "Current labels: Filed, OldNewsletters" in out
     assert '"remove_labels"' in out
+
+
+# ---------------- 1.4: one-or-two-label contract ----------------
+#
+# Same contract as the n8n engine that shares rules.md / labels.yaml:
+# a `labels` array of one or two names; a second only for genuine
+# overlap; never a third. Pre-1.4 scalar `label` is still accepted.
+
+from gmail_cleanup.prompt import MAX_LABELS, decision_labels, with_labels  # noqa: E402
+
+
+@pytest.fixture
+def two_cat():
+    return LabelCatalog(existing=["Filed"],
+                        auto_create={"Receipts": "orders", "Travel": "trips"})
+
+
+def test_decision_labels_reads_array_legacy_scalar_and_null():
+    assert decision_labels({"labels": ["Travel", "Receipts"]}) == ["Travel", "Receipts"]
+    assert decision_labels({"label": "Receipts"}) == ["Receipts"]      # v1.3.0 row
+    assert decision_labels({"label": None}) == []
+    assert decision_labels({}) == []
+    # duplicates and blanks dropped; `labels` wins over a stray `label`
+    assert decision_labels({"labels": ["A", "A", "", None], "label": "Z"}) == ["A"]
+    assert decision_labels({"labels": [], "label": "Z"}) == []
+
+
+def test_with_labels_sets_array_and_legacy_mirror():
+    assert with_labels({"id": "a"}, ["Travel", "Receipts"]) == {
+        "id": "a", "labels": ["Travel", "Receipts"], "label": "Travel"}
+    assert with_labels({"id": "a"}, []) == {"id": "a", "labels": [], "label": None}
+
+
+def test_build_prompt_states_two_label_contract(two_cat):
+    out = build_prompt("rules", two_cat,
+                       [{"id": "a", "sender": "s", "subject": "x", "snippet": "y"}])
+    assert "One label is the default." in out
+    assert "Never a third." in out
+    assert "Do not use a second label to avoid choosing." in out
+    assert '"labels": ["Travel", "Receipts"]' in out
+    assert '"labels": []' in out                     # trash shape
+    assert "exactly one label" not in out.lower()    # old contract is gone
+
+
+def test_build_relabel_prompt_states_contract_and_shows_both_current(two_cat):
+    out = build_relabel_prompt(two_cat, [
+        {"id": "a", "sender": "s", "subject": "x",
+         "current_category_labels": ["Travel", "Receipts"]},
+        {"id": "b", "sender": "s", "subject": "x", "current_label": "Filed"},  # pre-1.4 key
+    ])
+    assert "Do not use a second label to avoid choosing." in out
+    assert "Current label: Travel, Receipts" in out
+    assert "Current label: Filed" in out
+    assert '"labels": ["Travel", "Receipts"]' in out
+    assert "Choose exactly one label" not in out
+
+
+def test_parse_decisions_regex_fallback_reads_labels_array_and_scalar():
+    raw = ('noise {"id": "a", "action": "keep", "labels": ["Travel", "Receipts"]} '
+           '{"id": "b", "action": "keep", "label": "Filed"} '
+           '{"id": "c", "action": "trash", "labels": []} trailing')
+    out = parse_decisions(raw)
+    assert [decision_labels(d) for d in out] == [["Travel", "Receipts"], ["Filed"], []]
+
+
+def test_parse_relabel_regex_fallback_reads_labels_array():
+    raw = 'x {"id": "a", "labels": ["Travel", "Receipts"]} {"id": "b", "label": "Filed"}'
+    assert [decision_labels(d) for d in parse_relabel_decisions(raw)] == [
+        ["Travel", "Receipts"], ["Filed"]]
+
+
+def test_validate_strict_accepts_two_labels(two_cat):
+    good, missing, errs = validate_decisions_strict(
+        [{"id": "a", "action": "keep", "labels": ["Travel", "Receipts"]}],
+        [{"id": "a"}], two_cat)
+    assert good == [{"id": "a", "action": "keep",
+                     "labels": ["Travel", "Receipts"], "label": "Travel"}]
+    assert not missing and not errs
+
+
+def test_validate_strict_accepts_legacy_scalar_label(two_cat):
+    good, _, errs = validate_decisions_strict(
+        [{"id": "a", "action": "keep", "label": "Receipts"}], [{"id": "a"}], two_cat)
+    assert good[0]["labels"] == ["Receipts"] and good[0]["label"] == "Receipts"
+    assert not errs
+
+
+def test_validate_strict_trims_a_third_label(two_cat):
+    good, _, errs = validate_decisions_strict(
+        [{"id": "a", "action": "keep", "labels": ["Travel", "Receipts", "Filed"]}],
+        [{"id": "a"}], two_cat)
+    assert good[0]["labels"] == ["Travel", "Receipts"]
+    assert len(good[0]["labels"]) == MAX_LABELS
+    assert any("kept first 2" in e for e in errs)
+
+
+def test_validate_strict_drops_unknown_second_label(two_cat):
+    good, _, errs = validate_decisions_strict(
+        [{"id": "a", "action": "keep", "labels": ["Receipts", "Nope"]}],
+        [{"id": "a"}], two_cat)
+    assert good[0]["labels"] == ["Receipts"]
+    assert any("dropped unknown" in e for e in errs)
+
+
+def test_validate_strict_rejects_keep_with_no_known_label(two_cat):
+    for bad in ({"labels": ["Nope"]}, {"labels": []}, {"label": None}):
+        good, missing, errs = validate_decisions_strict(
+            [{"id": "a", "action": "keep", **bad}], [{"id": "a"}], two_cat)
+        assert good == [] and missing == {"a"}
+        assert any("unknown label" in e for e in errs)
+
+
+def test_validate_strict_trash_ignores_labels(two_cat):
+    good, _, errs = validate_decisions_strict(
+        [{"id": "a", "action": "trash", "labels": ["Travel", "Receipts"]}],
+        [{"id": "a"}], two_cat)
+    assert good == [{"id": "a", "action": "trash", "labels": [], "label": None}]
+    assert not errs
+
+
+def test_validate_relabel_accepts_two_labels_and_legacy(two_cat):
+    good, missing, errs = validate_relabel_decisions(
+        [{"id": "a", "labels": ["Travel", "Receipts"]}, {"id": "b", "label": "Filed"}],
+        [{"id": "a"}, {"id": "b"}], two_cat)
+    by_id = {g["id"]: g for g in good}
+    assert by_id["a"]["labels"] == ["Travel", "Receipts"]
+    assert by_id["b"]["labels"] == ["Filed"]
+    assert not missing and not errs

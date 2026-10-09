@@ -138,11 +138,20 @@ A real run's outcome (per [docs/results.md](docs/results.md)):
 
 A few label-system properties worth knowing up front:
 
-- **The model is forced to pick exactly one label per kept email** —
-  no comma-separated multi-labels, no "Misc/Other" fallback.
+- **One label per kept email by default, two only for genuine
+  overlap** (since 1.4). A hotel booking receipt really is both
+  travel and a receipt, so it may get both; a second label is never
+  a way to avoid choosing, and there is never a third. No
+  comma-separated labels, no "Misc/Other" fallback.
   [`config/rules.md`](config/rules.example.md) includes a "Don't
   reach for a catch-all label" principle: if no specific label
   clearly fits, prefer trash. This keeps the label set tight.
+- **Decisions and logs carry a `labels` array** (one or two names;
+  `[]` on trash). Each row also keeps `label`, the first entry, so
+  scripts written against 1.3 logs still work, and every reader
+  accepts 1.3 logs (scalar `label` only) unchanged. A model that
+  returns three labels is cut to the first two; an unknown second
+  label is dropped with a warning.
 - **Labels you don't include in the catalog won't be assigned.** The
   model can only choose from the catalog you gave it.
 - **You can reorganize later without re-classifying.** If after a
@@ -528,7 +537,7 @@ subcommand reorganizes **already-kept** mail against your updated
 # Dry-run — proposes label changes, writes relabel.log, touches nothing
 python -m gmail_cleanup relabel --input-log dry-run.log --dry-run
 
-# Review relabel.log — each line shows old_label → new_label + changed flag
+# Review relabel.log — each line shows old_labels → new_labels + changed flag
 
 # Apply — moves the Gmail label for every email whose label changed
 python -m gmail_cleanup relabel --input-log applied.log --apply
@@ -536,14 +545,16 @@ python -m gmail_cleanup relabel --input-log applied.log --apply
 
 Key properties:
 
-- **It cannot trash anything.** `relabel` only ever assigns a label.
+- **It cannot trash anything.** `relabel` only ever assigns labels.
   The LLM is never asked to decide keep-vs-trash; emails that were
   kept stay kept.
 - **It reads from a decision log** (`dry-run.log` or `applied.log`),
   taking only the `keep` rows. Trash and error rows are ignored.
 - **On `--apply`** it does a single `threads.modify` per changed
-  email: add the new label, remove the old one. Emails whose label
-  didn't change get no API call.
+  email, comparing label *sets*: add each label that is new, remove
+  each one that was dropped (so gaining a second label only adds it).
+  Emails whose labels didn't change, including a mere reordering, get
+  no API call.
 - **Resumable** via its own `relabel-state.json` (separate from the
   classify checkpoint), so Ctrl+C and re-run is safe.
 - **`--refetch-snippets`** re-pulls each email's snippet from Gmail

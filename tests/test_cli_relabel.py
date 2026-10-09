@@ -260,3 +260,68 @@ def test_relabel_backend_error_keeps_existing_label(tmp_path, patched):
     rows = [json.loads(l) for l in (tmp_path / "relabel.log").read_text()
             .splitlines() if l.strip().startswith("{")]
     assert any("relabel backend went down" in r.get("note", "") for r in rows)
+
+
+# ---------------- 1.4: label sets ----------------
+
+
+def _relabel_apply(tmp_path):
+    return CliRunner().invoke(cli, [
+        "relabel", "--apply", "--input-log", str(tmp_path / "src.log"),
+        "--log-file", str(tmp_path / "relabel.log"),
+        "--state-file", str(tmp_path / "relabel-state.json"),
+        "--concurrency", "1", "--confirm-every", "0",
+    ])
+
+
+def _relabel_rows(tmp_path):
+    return [json.loads(l) for l in (tmp_path / "relabel.log").read_text().splitlines()
+            if l.startswith("{")]
+
+
+def test_relabel_adds_second_label_without_removing_first(tmp_path, patched):
+    """v1.3.0 input row (scalar label) gains a second label: add only."""
+    _write_log(tmp_path / "src.log", [
+        {"id": "t1", "from": "a", "subject": "s", "action": "keep", "label": "Receipts"},
+    ])
+    patched["backend_responses"] = [json.dumps({"decisions": [
+        {"id": "t1", "labels": ["Receipts", "Family"]},
+    ]})]
+    result = _relabel_apply(tmp_path)
+    assert result.exit_code == 0, result.output
+
+    assert patched["client"].modified == [
+        {"id": "t1", "add": ["Label_2"], "remove": []}]      # +Family only
+    row = _relabel_rows(tmp_path)[0]
+    assert row["old_labels"] == ["Receipts"]
+    assert row["new_labels"] == ["Receipts", "Family"]
+    assert row["changed"] is True
+    assert row["old_label"] == "Receipts" and row["new_label"] == "Receipts"
+
+
+def test_relabel_drops_one_of_two_labels(tmp_path, patched):
+    _write_log(tmp_path / "src.log", [
+        {"id": "t1", "from": "a", "subject": "s", "action": "keep",
+         "labels": ["Receipts", "Family"], "label": "Receipts"},
+    ])
+    patched["backend_responses"] = [json.dumps({"decisions": [
+        {"id": "t1", "labels": ["Family"]},
+    ]})]
+    result = _relabel_apply(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert patched["client"].modified == [
+        {"id": "t1", "add": [], "remove": ["Label_1"]}]      # -Receipts only
+
+
+def test_relabel_reordered_labels_are_not_a_change(tmp_path, patched):
+    _write_log(tmp_path / "src.log", [
+        {"id": "t1", "from": "a", "subject": "s", "action": "keep",
+         "labels": ["Receipts", "Family"], "label": "Receipts"},
+    ])
+    patched["backend_responses"] = [json.dumps({"decisions": [
+        {"id": "t1", "labels": ["Family", "Receipts"]},
+    ]})]
+    result = _relabel_apply(tmp_path)
+    assert result.exit_code == 0, result.output
+    assert patched["client"].modified == []
+    assert _relabel_rows(tmp_path)[0]["changed"] is False

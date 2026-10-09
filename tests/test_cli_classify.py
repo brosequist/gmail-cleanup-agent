@@ -889,3 +889,28 @@ def test_classify_remove_label_only_no_category_still_modifies(
     mods = {m["id"]: m for m in patched["client"].modified}
     assert mods["t1"]["add"] == []
     assert mods["t1"]["remove"] == ["Label_99"]
+
+
+# ---------------- 1.4: two-label decisions ----------------
+
+
+def test_classify_apply_applies_both_labels_and_logs_them(tmp_path, patched,
+                                                          decisions_json):
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "labels": ["Receipts", "Family"]},
+        {"id": "t2", "action": "trash", "labels": []},
+    ])]
+    result = _invoke_classify(tmp_path, [
+        "--apply", "--concurrency", "1", "--confirm-every", "0",
+        "--query", "anything",
+    ])
+    assert result.exit_code == 0, result.output
+
+    mods = {m["id"]: m for m in patched["client"].modified}
+    assert mods["t1"]["add"] == ["Label_1", "Label_2"]   # Receipts, Family
+    assert patched["client"].trashed == ["t2"]
+
+    by_id = {r["id"]: r for r in _read_log(tmp_path / "dry-run.log")}
+    assert by_id["t1"]["labels"] == ["Receipts", "Family"]
+    assert by_id["t1"]["label"] == "Receipts"            # legacy mirror
+    assert by_id["t2"]["labels"] == [] and by_id["t2"]["label"] is None
