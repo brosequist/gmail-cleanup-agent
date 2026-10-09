@@ -21,7 +21,7 @@ from pathlib import Path
 
 import click
 
-from . import applylog
+from . import __version__, applylog
 from .gmail_client import GmailClient, ThreadSummary
 from .prompt import (
     LabelCatalog,
@@ -94,6 +94,7 @@ def _client() -> GmailClient:
 
 
 @click.group()
+@click.version_option(__version__, prog_name="gmail-cleanup")
 @click.option("-v", "--verbose", is_flag=True)
 @click.pass_context
 def cli(ctx, verbose):
@@ -105,7 +106,9 @@ def auth():
     """Run the Google OAuth flow. Opens a browser. One-time setup."""
     c = _client()
     c.authorize(force=True)
-    click.echo("OK — token saved to config/token.json")
+    # The token lands in whichever config dir resolved (env var, ./config,
+    # Docker's /config), so report the real path, not the repo default.
+    click.echo(f"OK — token saved to {c.token_path}")
 
 
 @cli.command()
