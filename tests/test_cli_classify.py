@@ -15,6 +15,8 @@ Exercises the Click CLI with mocked GmailClient + backend. Verifies:
   - --reviewed-label resolves case-insensitively against existing labels
   - nested label names work; names with a double-quote are excluded
     from the skip filter with a warning
+  - dry-run and --apply keep separate resume state; a state file from
+    the other mode is refused; --limit counts only new threads on resume
 """
 
 from __future__ import annotations
@@ -914,3 +916,83 @@ def test_classify_apply_applies_both_labels_and_logs_them(tmp_path, patched,
     assert by_id["t1"]["labels"] == ["Receipts", "Family"]
     assert by_id["t1"]["label"] == "Receipts"            # legacy mirror
     assert by_id["t2"]["labels"] == [] and by_id["t2"]["label"] is None
+
+
+# ---------------- resume state: dry run vs --apply ----------------
+
+
+def _classify(*args):
+    return CliRunner().invoke(cli, ["classify", "--concurrency", "1",
+                                    "--confirm-every", "0", *args])
+
+
+def test_classify_dry_run_then_apply_processes_the_same_threads(
+        tmp_path, patched, decisions_json):
+    """The README flow: sample with --dry-run, then --apply. With default
+    paths the two modes keep separate resume state, so --apply acts on
+    the threads the dry run only looked at (it used to skip them all)."""
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts"},
+        {"id": "t2", "action": "trash", "label": None},
+    ])]
+    assert _classify("--dry-run").exit_code == 0
+    dry = json.loads((tmp_path / "state-dry-run.json").read_text())
+    assert dry == {"mode": "dry-run", "processed": ["t1", "t2"]}
+    assert not (tmp_path / "state.json").exists()
+
+    result = _classify("--apply")
+    assert result.exit_code == 0, result.output
+    assert patched["client"].trashed == ["t2"]
+    assert {m["id"] for m in patched["client"].modified} == {"t1"}
+    applied = json.loads((tmp_path / "state.json").read_text())
+    assert applied == {"mode": "apply", "processed": ["t1", "t2"]}
+
+
+@pytest.mark.parametrize("first,second", [("--dry-run", "--apply"),
+                                          ("--apply", "--dry-run")])
+def test_classify_refuses_state_file_from_the_other_mode(
+        tmp_path, patched, decisions_json, first, second):
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t1", "action": "keep", "label": "Receipts"},
+        {"id": "t2", "action": "keep", "label": "Receipts"},
+    ])]
+    state = tmp_path / "shared-state.json"
+    assert _classify(first, "--state-file", str(state)).exit_code == 0
+    before = state.read_text()
+    patched["client"] = None
+
+    result = _classify(second, "--state-file", str(state))
+    assert result.exit_code == 2
+    assert "is resume state from a" in result.output
+    assert "--state-file" in result.output
+    assert patched["client"] is None      # refused before touching Gmail
+    assert state.read_text() == before    # and the file is untouched
+
+
+def test_classify_loads_a_pre_1_5_state_file_without_mode(
+        tmp_path, patched, decisions_json):
+    """A state file from 1.4 or earlier has no mode: it loads in either
+    mode, and the next checkpoint adds one."""
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"processed": ["t1"]}))
+    patched["backend_responses"] = [decisions_json([
+        {"id": "t2", "action": "trash", "label": None},
+    ])]
+    result = _classify("--apply", "--state-file", str(state))
+    assert result.exit_code == 0, result.output
+    assert patched["client"].trashed == ["t2"]
+    assert json.loads(state.read_text()) == {"mode": "apply",
+                                             "processed": ["t1", "t2"]}
+
+
+def test_classify_limit_counts_only_new_threads_on_resume(
+        tmp_path, patched, fake_thread, decisions_json):
+    patched["threads"] = [fake_thread(tid=f"u{i}") for i in range(5)]
+    (tmp_path / "state-dry-run.json").write_text(json.dumps(
+        {"mode": "dry-run", "processed": ["u0", "u1"]}))
+    patched["backend_responses"] = [decisions_json([
+        {"id": f"u{i}", "action": "trash", "label": None} for i in (2, 3)
+    ])]
+    result = _classify("--dry-run", "--limit", "2", "--batch-size", "2")
+    assert result.exit_code == 0, result.output
+    assert {r["id"] for r in _read_log(tmp_path / "dry-run.log")} == {"u2", "u3"}

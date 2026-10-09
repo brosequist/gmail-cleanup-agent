@@ -129,14 +129,13 @@ class FakeGmailClient:
         self.last_query = query
         self.last_include_body = include_body
         skip_ids = skip_ids or set()
-        n = 0
+        n = 0  # like GmailClient: resume-skipped placeholders don't count
         for t in self.threads_to_yield:
             if max_threads is not None and n >= max_threads:
                 return
             if t.thread_id in skip_ids:
                 yield ThreadSummary(thread_id=t.thread_id, sender="",
                                     subject="", snippet="", date="")
-                n += 1
                 continue
             yield t
             n += 1
