@@ -35,6 +35,72 @@ class LabelCatalog:
         )
 
 
+# A kept email gets one category label by default and a second only when
+# two categories are independently true of it. Same contract as the n8n
+# engine that shares this repo's rules.md and labels.yaml.
+MAX_LABELS = 2
+
+
+def decision_labels(d: dict) -> list[str]:
+    """Category labels on a decision or decision-log record, in order.
+
+    Reads the `labels` array (1.4+), falling back to the scalar `label`
+    that v1.3.0 and earlier wrote, so old logs keep working everywhere a
+    decision is read. Blank and duplicate names are dropped; never None.
+    A record that has a `labels` key is trusted over its `label` key.
+    """
+    raw = d.get("labels")
+    if isinstance(raw, list):
+        names = raw
+    else:
+        legacy = d.get("label")
+        names = [legacy] if legacy else []
+    out: list[str] = []
+    for name in names:
+        if isinstance(name, str) and name and name not in out:
+            out.append(name)
+    return out
+
+
+def with_labels(d: dict, labels: list[str]) -> dict:
+    """Set a decision's labels: the `labels` array plus `label`, its first
+    entry, kept as a legacy mirror for readers written against v1.3.0."""
+    d["labels"] = list(labels)
+    d["label"] = labels[0] if labels else None
+    return d
+
+
+def _validate_labels(
+    d: dict, valid_labels: set[str], eid: str, errors: list[str],
+) -> list[str] | None:
+    """Check a keep decision's labels against the catalog. Returns the
+    accepted labels, or None when nothing usable is left (the caller
+    treats that as an invalid decision and re-prompts). More than
+    MAX_LABELS are cut to the first MAX_LABELS, and unknown names are
+    dropped while at least one known one remains, both with an error
+    event, as the n8n engine does."""
+    labels = decision_labels(d)
+    if len(labels) > MAX_LABELS:
+        errors.append(f"id={eid}: {len(labels)} labels, kept first "
+                      f"{MAX_LABELS}: {'/'.join(labels)}")
+        labels = labels[:MAX_LABELS]
+    unknown = [n for n in labels if n not in valid_labels]
+    known = [n for n in labels if n in valid_labels]
+    if not known:
+        # Same message shape as v1.3.0 for the one-label and no-label cases.
+        if len(unknown) == 1:
+            shown = unknown[0]
+        elif unknown:
+            shown = unknown
+        else:
+            shown = d.get("labels", d.get("label"))
+        errors.append(f"id={eid}: unknown label {shown!r}")
+        return None
+    if unknown:
+        errors.append(f"id={eid}: dropped unknown label(s) {unknown!r}")
+    return known
+
+
 def load_whitelist(path: Path) -> list[str]:
     """Return the non-comment, non-blank lines of the whitelist."""
     if not path.exists():
@@ -64,6 +130,21 @@ def is_whitelisted(sender: str, whitelist: list[str]) -> bool:
     return False
 
 
+# The one-or-two-label contract, worded as in the n8n engine's prompt so a
+# rule in the shared rules.md means the same thing to both. Used by
+# build_prompt and build_relabel_prompt.
+_TWO_LABEL_GUIDANCE = """**One label is the default.** Add a SECOND label only when two categories
+are independently true of the same email: a hotel booking receipt really
+is both a travel record and a receipt; a vet bill really is both a pet
+matter and a statement. Never a third.
+
+**Do not use a second label to avoid choosing.** Where the rules already
+settle a pairing (a bill goes in one category, a one-off purchase in
+another), that decision is made: apply the one the rules name. A second
+label is for genuine overlap, not for hedging.
+"""
+
+
 def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str:
     """Render the system+user prompt as a single string. The structure:
 
@@ -81,8 +162,10 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
 
       Return ONLY a single JSON object with key `decisions`, an array of
       one object per input email in the same order, each:
-        {"id": "<id>", "action": "keep"|"trash", "label": "<label or null>",
+        {"id": "<id>", "action": "keep"|"trash", "labels": ["<one or two>"],
          "remove_labels": ["X", "Y"]}  # optional; only when removable catalog is on
+      `labels` is [] on trash: unlike the n8n engine, which defers trash
+      for 30 days and so categorises it, this agent trashes immediately.
 
       # Emails
 
@@ -127,19 +210,22 @@ def build_prompt(rules_md: str, catalog: LabelCatalog, batch: list[dict]) -> str
         )
 
     schema_example = (
-        '{"id": "...", "action": "keep", "label": "Receipts"'
+        '{"id": "...", "action": "keep", "labels": ["Receipts"]'
         + (', "remove_labels": ["LegacyTag"]' if catalog.removable else '')
-        + '},\n  {"id": "...", "action": "trash", "label": null}'
+        + '},\n  {"id": "...", "action": "keep", "labels": ["Travel", "Receipts"]},'
+        + '\n  {"id": "...", "action": "trash", "labels": []}'
     )
 
     return f"""{rules_md.strip()}
 
 # Available labels
 
-When `action` is `keep`, choose the single best-matching label from this
-list. If `action` is `trash`, set `label` to `null`. Pick exactly one
-label per kept email — no nesting, no comma-separated values.
+When `action` is `keep`, give the email its best-matching label from this
+list in a `labels` array. Use label names exactly as written: no nesting,
+no comma-separated values, no invented names. If `action` is `trash`, set
+`labels` to an empty array `[]`.
 
+{_TWO_LABEL_GUIDANCE}
 {chr(10).join(label_lines)}
 {removable_section}
 # Output format
@@ -154,8 +240,8 @@ Return ONLY a JSON object with this exact structure (no prose, no markdown):
 
 The `decisions` array must have exactly the same number of entries as
 input emails, in the same order. Each `id` must match an input id. Each
-`action` is either `"keep"` or `"trash"`. Each `label` is either one of
-the labels above (when keeping) or `null` (when trashing).
+`action` is either `"keep"` or `"trash"`. Each `labels` is an array of one
+or two of the labels above when keeping, and `[]` when trashing.
 
 # Emails to classify
 
@@ -188,14 +274,28 @@ list category/keep labels here — only labels from this catalog.
 """
 
 
+# The label part of a decision in the regex fallback: the 1.4 `labels`
+# array, or the scalar `label` an older prompt or model may still emit.
+_LABELS_FRAGMENT = (
+    r'(?:"labels"\s*:\s*\[(?P<labels>[^\]]*)\]'
+    r'|"label"\s*:\s*(?:"(?P<label>[^"]*)"|null))'
+)
+
 # Strict regex for one decision entry — used to repair partial output
 # when a model occasionally truncates JSON.
 _DECISION_RE = re.compile(
     r'\{\s*"id"\s*:\s*"(?P<id>[^"]+)"\s*,'
     r'\s*"action"\s*:\s*"(?P<action>keep|trash)"\s*,'
-    r'\s*"label"\s*:\s*(?:"(?P<label>[^"]*)"|null)\s*\}',
+    r'\s*' + _LABELS_FRAGMENT + r'\s*\}',
     re.DOTALL,
 )
+
+
+def _regex_labels(m: re.Match) -> list[str]:
+    """Labels from a regex-fallback match, whichever shape it used."""
+    if m.group("labels") is not None:
+        return re.findall(r'"([^"]*)"', m.group("labels"))
+    return [m.group("label")] if m.group("label") else []
 
 
 def parse_decisions(raw: str) -> list[dict]:
@@ -229,7 +329,7 @@ def parse_decisions(raw: str) -> list[dict]:
         out.append({
             "id": m.group("id"),
             "action": m.group("action"),
-            "label": m.group("label") if m.group("label") is not None else None,
+            "labels": _regex_labels(m),
         })
     return out
 
@@ -244,7 +344,7 @@ def validate_decisions(
     out, missing_ids, errors = validate_decisions_strict(decisions, batch, catalog)
     for eid in missing_ids:
         errors.append(f"id={eid}: missing decision (defaulted to keep)")
-        out.append({"id": eid, "action": "keep", "label": None})
+        out.append(with_labels({"id": eid, "action": "keep"}, []))
     return out, errors
 
 
@@ -280,17 +380,19 @@ def validate_decisions_strict(
         if action not in ("keep", "trash"):
             errors.append(f"id={eid}: bad action {action!r}")
             continue
-        label = d.get("label")
-        if action == "keep" and label not in valid_labels:
-            errors.append(f"id={eid}: unknown label {label!r}")
-            continue
-        if action == "trash":
-            label = None
+        if action == "keep":
+            labels = _validate_labels(d, valid_labels, eid, errors)
+            if labels is None:
+                continue
+        else:
+            # Trash takes no category here (it is gone at once); anything
+            # the model sent is ignored rather than treated as an error.
+            labels = []
         remove_labels = _filter_remove_labels(
             d.get("remove_labels"), by_id[eid], catalog,
             action, eid, errors)
         seen_ids.add(eid)
-        decision: dict = {"id": eid, "action": action, "label": label}
+        decision: dict = with_labels({"id": eid, "action": action}, labels)
         if remove_labels:
             decision["remove_labels"] = remove_labels
         out.append(decision)
@@ -342,10 +444,11 @@ def _filter_remove_labels(
 
 def build_relabel_prompt(catalog: LabelCatalog, batch: list[dict]) -> str:
     """Render a label-only prompt. Each batch item is a dict with keys
-    `id`, `sender`, `subject`, and optionally `snippet`,
-    `current_label`, and `current_labels` (all Gmail labels on the
-    thread, used only when the removable catalog is on). The model
-    returns one label per email plus an optional `remove_labels`."""
+    `id`, `sender`, `subject`, and optionally `snippet`, the email's
+    current category label(s) as `current_category_labels` (list) or the
+    pre-1.4 `current_label` (str), and `current_labels` (all Gmail labels
+    on the thread, used only when the removable catalog is on). The model
+    returns one or two labels per email plus an optional `remove_labels`."""
     label_lines = []
     for name in catalog.existing:
         label_lines.append(f"- `{name}` (existing)")
@@ -359,30 +462,35 @@ def build_relabel_prompt(catalog: LabelCatalog, batch: list[dict]) -> str:
         lines = [f"## {i}. id: {e['id']}", f"From: {e['sender']}", f"Subject: {e['subject']}"]
         if e.get("snippet"):
             lines.append(f"Snippet: {e['snippet'][:300]}")
-        if e.get("current_label"):
-            lines.append(f"Current label: {e['current_label']}")
+        current = e.get("current_category_labels")
+        if current is None and e.get("current_label"):
+            current = [e["current_label"]]
+        if current:
+            lines.append(f"Current label: {', '.join(current)}")
         if catalog.removable and e.get("current_labels"):
             lines.append("Current labels: " + ", ".join(e["current_labels"]))
         emails_block.append("\n".join(lines) + "\n")
 
     schema_example = (
-        '{"id": "...", "label": "Receipts"'
+        '{"id": "...", "labels": ["Receipts"]'
         + (', "remove_labels": ["LegacyTag"]' if catalog.removable else '')
-        + '},\n  {"id": "...", "label": "Travel"}'
+        + '},\n  {"id": "...", "labels": ["Travel", "Receipts"]}'
     )
 
     return f"""You are an email-organizing assistant. Every email below has
 already been reviewed and is being KEPT — you are NOT deciding whether to
-keep or trash anything. Your only task is to assign each email the single
-best-fitting label from the catalog.
+keep or trash anything. Your only task is to assign each email the
+best-fitting label(s) from the catalog.
 
 # Available labels
 
-Choose exactly one label per email — the closest fit. If the email's
-`Current label` is still the best fit, return that same label. Only
-choose a different label when another one clearly fits better (for
-example, a newly added category that is a tighter match).
+Give each email the closest-fitting label in a `labels` array. If the
+email's `Current label` is still the best fit, return that same label (or
+both, if it has two). Only choose a different label when another one
+clearly fits better (for example, a newly added category that is a tighter
+match).
 
+{_TWO_LABEL_GUIDANCE}
 {chr(10).join(label_lines)}
 {removable_section}
 # Output format
@@ -397,7 +505,7 @@ Return ONLY a JSON object with this exact structure (no prose, no markdown):
 
 The `decisions` array must have exactly the same number of entries as
 input emails, in the same order. Each `id` must match an input id. Each
-`label` must be exactly one of the labels listed above.
+`labels` must be an array of one or two of the labels listed above.
 
 # Emails to label
 
@@ -407,7 +515,7 @@ input emails, in the same order. Each `id` must match an input id. Each
 
 _RELABEL_RE = re.compile(
     r'\{\s*"id"\s*:\s*"(?P<id>[^"]+)"\s*,'
-    r'\s*"label"\s*:\s*"(?P<label>[^"]*)"\s*\}',
+    r'\s*' + _LABELS_FRAGMENT + r'\s*\}',
     re.DOTALL,
 )
 
@@ -431,7 +539,7 @@ def parse_relabel_decisions(raw: str) -> list[dict]:
 
     out = []
     for m in _RELABEL_RE.finditer(raw):
-        out.append({"id": m.group("id"), "label": m.group("label")})
+        out.append({"id": m.group("id"), "labels": _regex_labels(m)})
     return out
 
 
@@ -439,10 +547,10 @@ def validate_relabel_decisions(
     decisions: list[dict], batch: list[dict], catalog: LabelCatalog
 ) -> tuple[list[dict], set[str], list[str]]:
     """Strict relabel validator. Returns (good, missing_ids, errors).
-    `good` entries are {id, label} (with optional `remove_labels`) and
-    label is guaranteed to be in the catalog. Caller re-prompts missing
-    ids, then falls back to keeping each missing email's existing label
-    (never drops a label).
+    `good` entries are {id, labels, label} (with optional `remove_labels`):
+    one or two labels, all in the catalog, with `label` mirroring the
+    first. Caller re-prompts missing ids, then falls back to keeping each
+    missing email's existing labels (never drops a label).
 
     Optional `remove_labels` validated the same way as in classify:
     must be in `catalog.removable` AND in the batch item's
@@ -461,15 +569,14 @@ def validate_relabel_decisions(
         if eid in seen_ids:
             errors.append(f"duplicate id: {eid!r}")
             continue
-        label = d.get("label")
-        if label not in valid_labels:
-            errors.append(f"id={eid}: unknown label {label!r}")
+        labels = _validate_labels(d, valid_labels, eid, errors)
+        if labels is None:
             continue
         remove_labels = _filter_remove_labels(
             d.get("remove_labels"), by_id[eid], catalog,
             "keep", eid, errors)
         seen_ids.add(eid)
-        entry: dict = {"id": eid, "label": label}
+        entry: dict = with_labels({"id": eid}, labels)
         if remove_labels:
             entry["remove_labels"] = remove_labels
         out.append(entry)

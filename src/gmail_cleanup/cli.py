@@ -27,12 +27,14 @@ from .prompt import (
     LabelCatalog,
     build_prompt,
     build_relabel_prompt,
+    decision_labels,
     is_whitelisted,
     load_whitelist,
     parse_decisions,
     parse_relabel_decisions,
     validate_decisions_strict,
     validate_relabel_decisions,
+    with_labels,
 )
 from .backends import get_backend
 
@@ -718,7 +720,8 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                     except Exception as e:
                         logger.error("relabel worker died: %s", e)
                         results[idx] = [
-                            {"id": r["id"], "label": r.get("label"), "_err": str(e)}
+                            with_labels({"id": r["id"], "_err": str(e)},
+                                        decision_labels(r))
                             for r in buffer[idx]
                         ]
             forced_remove_ids = [lid for _, lid in forced_remove]
@@ -729,14 +732,16 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                     rec = by_id.get(d["id"])
                     if rec is None:
                         continue
-                    old_label = rec.get("label")
-                    new_label = d.get("label")
+                    # Compare label SETS: one or two each side, and the
+                    # input log may be pre-1.4 (scalar `label`).
+                    old_labels = decision_labels(rec)
+                    new_labels = decision_labels(d)
                     err = d.get("_err")
                     if err:
                         with counters_lock:
                             counters["errors"] += 1
                         with log_lock:
-                            _log_relabel(log_fh, rec, old_label, old_label, False,
+                            _log_relabel(log_fh, rec, old_labels, old_labels, False,
                                          f"error: {err[:200]}")
                         continue
                     # Combine forced + LLM-proposed removals (LLM-proposed
@@ -750,24 +755,29 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                             continue
                         seen.add(name)
                         remove_names.append(name)
-                    changed = new_label != old_label
+                    # Order-insensitive: [A, B] -> [B, A] is no change.
+                    added = [n for n in new_labels if n not in old_labels]
+                    dropped = [n for n in old_labels if n not in new_labels]
+                    changed = bool(added or dropped)
                     if apply and (changed or remove_names):
                         add_ids: list[str] = []
                         remove_ids: list[str] = list(forced_remove_ids)
-                        if changed:
-                            if new_label in label_ids:
-                                add_ids.append(label_ids[new_label])
+                        for name in added:
+                            if name in label_ids:
+                                add_ids.append(label_ids[name])
                             else:
                                 logger.warning(
                                     "new label %r has no Gmail id; logging only",
-                                    new_label)
-                            if old_label in label_ids:
-                                remove_ids.append(label_ids[old_label])
+                                    name)
+                        for name in dropped:
+                            lid = label_ids.get(name)
+                            if lid and lid not in remove_ids:
+                                remove_ids.append(lid)
                         for name in llm_remove_names:
                             lid = label_ids.get(name)
                             if lid and lid not in remove_ids:
                                 remove_ids.append(lid)
-                        # Skip empty modifies (can happen when new_label
+                        # Skip empty modifies (can happen when a new label
                         # has no Gmail id and no removals): treat as a
                         # log-only event.
                         if add_ids or remove_ids:
@@ -780,14 +790,14 @@ def relabel(input_log, batch_size, llm_retries, apply, confirm_every,
                                 with counters_lock:
                                     counters["errors"] += 1
                                 with log_lock:
-                                    _log_relabel(log_fh, rec, old_label, new_label, False,
+                                    _log_relabel(log_fh, rec, old_labels, new_labels, False,
                                                  f"apply failed: {e}",
                                                  removed_labels=remove_names or None)
                                 continue
                     with counters_lock:
                         counters["changed" if changed else "unchanged"] += 1
                     with log_lock:
-                        _log_relabel(log_fh, rec, old_label, new_label, changed,
+                        _log_relabel(log_fh, rec, old_labels, new_labels, changed,
                                      "applied" if (changed and apply) else "",
                                      removed_labels=remove_names or None)
                     processed.add(rec["id"])
@@ -824,16 +834,17 @@ def _relabel_pure(
     """Pure relabel worker, safe to call from a thread. `batch` items are
     decision-log records ({id, from, subject, label}). If `client` is
     given, snippets are re-fetched from Gmail for richer context.
-    Returns a list of {id, label} — label is the model's choice, or the
-    email's existing label if the model never produced a valid one.
-    Never decides keep-vs-trash."""
+    Returns a list of {id, labels, label}: the model's one or two labels,
+    or the email's existing labels if the model never produced a valid
+    answer. Never decides keep-vs-trash."""
     llm_batch: list[dict] = []
     for rec in batch:
         item = {
             "id": rec["id"],
             "sender": rec.get("from", ""),
             "subject": rec.get("subject", ""),
-            "current_label": rec.get("label"),
+            # Pre-1.4 logs carry a scalar `label`; decision_labels reads both.
+            "current_category_labels": decision_labels(rec),
         }
         if client is not None:
             try:
@@ -864,7 +875,8 @@ def _relabel_pure(
             logger.error("backend error: %s", e)
             if attempt == 0:
                 # First call failed entirely — surface every email as an error
-                return [{"id": x["id"], "label": x.get("current_label"), "_err": str(e)}
+                return [with_labels({"id": x["id"], "_err": str(e)},
+                                    x["current_category_labels"])
                         for x in llm_batch]
             break
 
@@ -881,21 +893,27 @@ def _relabel_pure(
     # Anything still unlabeled by the model keeps its existing label —
     # never drop a label just because the model fumbled the JSON.
     for x in remaining:
-        logger.warning("id=%s: no valid label after %d retries; keeping existing label %r",
-                       x["id"], llm_retries, x.get("current_label"))
-        decisions.append({"id": x["id"], "label": x.get("current_label")})
+        logger.warning("id=%s: no valid label after %d retries; keeping existing label(s) %r",
+                       x["id"], llm_retries, x["current_category_labels"])
+        decisions.append(with_labels({"id": x["id"]}, x["current_category_labels"]))
 
     return decisions
 
 
-def _log_relabel(fh, rec: dict, old_label, new_label, changed: bool, note: str,
+def _log_relabel(fh, rec: dict, old_labels: list[str], new_labels: list[str],
+                 changed: bool, note: str,
                  removed_labels: list[str] | None = None):
+    """One relabel-log row. `old_labels`/`new_labels` are the full sets;
+    `old_label`/`new_label` mirror their first entries as in v1.3.0."""
+    old_labels, new_labels = list(old_labels or []), list(new_labels or [])
     out = {
         "id": rec["id"],
         "from": rec.get("from", ""),
         "subject": (rec.get("subject", "") or "")[:120],
-        "old_label": old_label,
-        "new_label": new_label,
+        "old_labels": old_labels,
+        "new_labels": new_labels,
+        "old_label": old_labels[0] if old_labels else None,
+        "new_label": new_labels[0] if new_labels else None,
         "changed": changed,
         "note": note,
     }
@@ -956,8 +974,8 @@ def _classify_pure(
             if attempt == 0:
                 # First call failed entirely — surface as full-batch error
                 for x in llm_batch:
-                    decisions.append({"id": x["id"], "action": "error",
-                                      "label": None, "_err": str(e)})
+                    decisions.append(with_labels(
+                        {"id": x["id"], "action": "error", "_err": str(e)}, []))
                 return batch, decisions, whitelisted
             # Retry call failed — break out and accept what we have
             break
@@ -979,7 +997,7 @@ def _classify_pure(
     for x in remaining:
         logger.warning("id=%s: still missing after %d retries; defaulting to keep",
                        x["id"], llm_retries)
-        decisions.append({"id": x["id"], "action": "keep", "label": None})
+        decisions.append(with_labels({"id": x["id"], "action": "keep"}, []))
 
     return batch, decisions, whitelisted
 
@@ -1081,7 +1099,9 @@ def _apply_decisions(
                     _log(log_fh, t, "trash", None,
                          "" if not apply else "applied")
         else:  # keep
-            label = d.get("label")
+            # One or two category labels (decision_labels also reads a
+            # pre-1.4 scalar `label`).
+            labels = decision_labels(d)
             # LLM-proposed strips (already validated against
             # catalog.removable + current_labels) + forced strips,
             # de-duplicated, preserving forced-first order.
@@ -1096,7 +1116,7 @@ def _apply_decisions(
             err = None
             if apply:
                 add_ids: list[str] = []
-                if label:
+                for label in labels:
                     lid = label_ids.get(label)
                     if lid:
                         add_ids.append(lid)
@@ -1132,21 +1152,27 @@ def _apply_decisions(
                 with counters_lock:
                     counters["keep"] += 1
                 with log_lock:
-                    _log(log_fh, t, "keep", label,
+                    _log(log_fh, t, "keep", labels,
                          "" if not apply else "applied",
                          reviewed_label=reviewed_label,
                          removed_labels=remove_names or None)
 
 
-def _log(fh, t: ThreadSummary, action: str, label: str | None, note: str,
+def _log(fh, t: ThreadSummary, action: str, labels: list[str] | None, note: str,
          reviewed_label: str | None = None,
          removed_labels: list[str] | None = None):
+    """One decision-log row. `labels` holds every category label applied
+    (one or two); `label` mirrors the first so tools written against
+    v1.3.0 logs keep working. Readers should use prompt.decision_labels,
+    which accepts both shapes."""
+    labels = list(labels or [])
     rec = {
         "id": t.thread_id,
         "from": t.sender,
         "subject": t.subject[:120],
         "action": action,
-        "label": label,
+        "labels": labels,
+        "label": labels[0] if labels else None,
         "note": note,
     }
     if reviewed_label:

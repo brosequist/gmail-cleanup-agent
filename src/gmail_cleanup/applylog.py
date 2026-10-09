@@ -5,10 +5,12 @@ thread ID, and replays each one via Gmail's batch HTTP endpoint:
 
   - action="trash"            -> users().threads().trash(...)
   - action="keep"             -> users().threads().modify(addLabelIds=[...])
-                                 labels = the category label and/or the
-                                 `reviewed_label` the classify run recorded
-                                 on the row; a keep with neither makes no
-                                 Gmail call (already kept, nothing to add)
+                                 labels = the row's category label(s) (one
+                                 or two; a v1.3.0 row's scalar `label` works
+                                 too) and/or the `reviewed_label` the
+                                 classify run recorded on the row; a keep
+                                 with none makes no Gmail call (already
+                                 kept, nothing to add)
   - action="error"            -> skipped (never applied)
 
 Single-threaded — the existing GmailClient is not thread-safe (see
@@ -33,6 +35,7 @@ from collections import Counter
 from pathlib import Path
 
 from .gmail_client import GmailClient
+from .prompt import decision_labels
 
 logger = logging.getLogger("gmail_cleanup.applylog")
 
@@ -43,18 +46,24 @@ MAX_429_RETRIES = 5
 
 
 def _keep_label_names(d: dict) -> list[str]:
-    """Label names a `keep` decision should apply: the category label the
-    classifier chose (if any), plus the `--reviewed-label` name the
-    classify run recorded on the row (if any). Either may be absent.
+    """Label names a `keep` decision should apply: every category label the
+    classifier chose (one or two; `decision_labels` also reads a v1.3.0
+    row's scalar `label`), plus the `--reviewed-label` name the classify
+    run recorded on the row (if any). Either may be absent.
     Category-first so audit output and modify calls read naturally."""
-    names: list[str] = []
-    label = d.get("label")
-    if label:
-        names.append(label)
+    names: list[str] = list(decision_labels(d))
     reviewed = d.get("reviewed_label")
     if reviewed and reviewed not in names:
         names.append(reviewed)
     return names
+
+
+def _audit_labels(rec: dict, labels: list[str]) -> dict:
+    """Add the category labels to an audit record: `labels` (all of them)
+    plus `label`, the first, as written by v1.3.0."""
+    rec["labels"] = list(labels)
+    rec["label"] = labels[0] if labels else None
+    return rec
 
 
 def load_latest_decisions(log_path: Path) -> dict[str, dict]:
@@ -95,8 +104,9 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
                 else:
                     counters["keep_labeled"] += 1
                     result = "keep_labeled"
-                audit_rec = {"id": request_id, "result": result,
-                             "label": d.get("label")}
+                audit_rec = _audit_labels(
+                    {"id": request_id, "result": result},
+                    decision_labels(d) if result != "trash" else [])
                 if d.get("reviewed_label"):
                     audit_rec["reviewed_label"] = d["reviewed_label"]
                 audit_fh.write(json.dumps(audit_rec) + "\n")
@@ -234,24 +244,24 @@ def run_apply_log(
             for d in chunk:
                 tid = d["id"]
                 action = d["action"]
-                label = d.get("label")
-                # All labels a keep should apply: category + reviewed_label.
+                # All labels a keep should apply: category label(s) + reviewed_label.
                 names = _keep_label_names(d) if action == "keep" else []
                 if action == "keep" and not names:
                     counters["keep_nolabel"] += 1
-                    audit_fh.write(json.dumps(
-                        {"id": tid, "result": "keep_nolabel", "label": None}) + "\n")
+                    audit_fh.write(json.dumps(_audit_labels(
+                        {"id": tid, "result": "keep_nolabel"}, [])) + "\n")
                     if apply:
                         applied_ids.add(tid)
                     continue
                 if not apply:
                     if action == "trash":
                         counters["trash"] += 1
-                        audit_fh.write(json.dumps(
-                            {"id": tid, "result": "trash", "label": None}) + "\n")
+                        audit_fh.write(json.dumps(_audit_labels(
+                            {"id": tid, "result": "trash"}, [])) + "\n")
                     else:
                         counters["keep_labeled"] += 1
-                        rec = {"id": tid, "result": "keep_labeled", "label": label}
+                        rec = _audit_labels({"id": tid, "result": "keep_labeled"},
+                                            decision_labels(d))
                         if d.get("reviewed_label"):
                             rec["reviewed_label"] = d["reviewed_label"]
                         audit_fh.write(json.dumps(rec) + "\n")
