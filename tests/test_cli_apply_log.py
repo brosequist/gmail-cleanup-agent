@@ -8,6 +8,8 @@ each decision against Gmail. Tests cover:
   - --limit caps the workload
   - missing label in --apply mode triggers an error row, not a crash
   - a reviewed_label on a keep row is applied alongside the category label
+  - a keep row's removed_labels are stripped (removeLabelIds), even with
+    nothing to add; labels Gmail lacks are skipped, never created
 """
 
 from __future__ import annotations
@@ -316,3 +318,84 @@ def test_apply_log_latest_decision_wins(tmp_path, patched_gmail):
             if l.strip().startswith("{")]
     assert len(rows) == 1
     assert rows[0]["result"] == "trash"
+
+
+def _rows(p: Path) -> dict[str, dict]:
+    return {r["id"]: r for r in (json.loads(l) for l in p.read_text()
+            .splitlines() if l.strip().startswith("{"))}
+
+
+def _apply(tmp_path, patched_gmail, rows, *, dry_run=False):
+    log = tmp_path / "dry-run.log"
+    _write_log(log, rows)
+    result = CliRunner().invoke(cli, [
+        "apply-log", "--dry-run" if dry_run else "--apply",
+        "--log-file", str(log),
+        "--state-file", str(tmp_path / "state-applied.json"),
+        "--audit-log", str(tmp_path / "audit.log"),
+        "--batch-sleep", "0",
+        *_creds_args(patched_gmail),
+    ])
+    assert result.exit_code == 0, result.output
+    return patched_gmail["client"], _rows(tmp_path / "audit.log")
+
+
+def test_apply_log_replays_removals_with_additions(tmp_path, patched_gmail):
+    """A keep row's removed_labels are stripped in the same modify call
+    that adds its labels, as classify --apply would have done."""
+    fake, audit = _apply(tmp_path, patched_gmail, [
+        {"id": "t1", "action": "keep", "labels": ["Receipts"],
+         "label": "Receipts", "removed_labels": ["Family"]},
+    ])
+    (tid, body), = fake._service._modify_calls
+    assert tid == "t1"
+    assert body["addLabelIds"] == [fake._labels["Receipts"]]
+    assert body["removeLabelIds"] == [fake._labels["Family"]]
+    assert audit["t1"]["result"] == "keep_labeled"
+    assert audit["t1"]["removed_labels"] == ["Family"]
+
+
+def test_apply_log_removal_only_keep_still_modifies(tmp_path, patched_gmail):
+    """A keep with nothing to add but a label to strip (whitelisted thread
+    under --remove-label) is not a no-op keep_nolabel."""
+    fake, audit = _apply(tmp_path, patched_gmail, [
+        {"id": "t1", "action": "keep", "labels": [], "label": None,
+         "note": "whitelist", "removed_labels": ["Family"]},
+    ])
+    (tid, body), = fake._service._modify_calls
+    assert tid == "t1"
+    assert body == {"addLabelIds": [],
+                    "removeLabelIds": [fake._labels["Family"]]}
+    assert audit["t1"]["result"] == "keep_labeled"
+    assert audit["t1"]["removed_labels"] == ["Family"]
+    state = json.loads((tmp_path / "state-applied.json").read_text())
+    assert state["applied"] == ["t1"]
+
+
+def test_apply_log_skips_removal_label_missing_from_gmail(tmp_path,
+                                                          patched_gmail):
+    """A removal label Gmail doesn't have is skipped (never created just to
+    be removed); the rest of the row still applies, and a row left with
+    nothing to do is keep_nolabel."""
+    fake, audit = _apply(tmp_path, patched_gmail, [
+        {"id": "t1", "action": "keep", "labels": ["Receipts"],
+         "label": "Receipts", "removed_labels": ["Gone", "Family"]},
+        {"id": "t2", "action": "keep", "labels": [], "label": None,
+         "removed_labels": ["Gone"]},
+    ])
+    assert "Gone" not in fake.created_labels
+    (tid, body), = fake._service._modify_calls
+    assert tid == "t1"
+    assert body["removeLabelIds"] == [fake._labels["Family"]]
+    assert audit["t1"]["removed_labels"] == ["Family"]
+    assert audit["t2"]["result"] == "keep_nolabel"
+
+
+def test_apply_log_dry_run_preview_shows_removals(tmp_path, patched_gmail):
+    fake, audit = _apply(tmp_path, patched_gmail, [
+        {"id": "t1", "action": "keep", "labels": [], "label": None,
+         "removed_labels": ["Family"]},
+    ], dry_run=True)
+    assert fake._service._modify_calls == []
+    assert audit["t1"]["result"] == "keep_labeled"
+    assert audit["t1"]["removed_labels"] == ["Family"]

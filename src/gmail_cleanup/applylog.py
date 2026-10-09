@@ -4,13 +4,17 @@ Reads a decision log (e.g. dry-run.log), keeps the latest decision per
 thread ID, and replays each one via Gmail's batch HTTP endpoint:
 
   - action="trash"            -> users().threads().trash(...)
-  - action="keep"             -> users().threads().modify(addLabelIds=[...])
-                                 labels = the row's category label(s) (one
+  - action="keep"             -> users().threads().modify(addLabelIds=[...],
+                                                     removeLabelIds=[...])
+                                 add = the row's category label(s) (one
                                  or two; a v1.3.0 row's scalar `label` works
                                  too) and/or the `reviewed_label` the
-                                 classify run recorded on the row; a keep
-                                 with none makes no Gmail call (already
-                                 kept, nothing to add)
+                                 classify run recorded on the row;
+                                 remove = the row's `removed_labels`
+                                 (--remove-label and model-proposed
+                                 removals) that exist in Gmail. A keep
+                                 with nothing to add or remove makes no
+                                 Gmail call (already kept, nothing to do)
   - action="error"            -> skipped (never applied)
 
 Single-threaded — the existing GmailClient is not thread-safe (see
@@ -56,6 +60,13 @@ def _keep_label_names(d: dict) -> list[str]:
     if reviewed and reviewed not in names:
         names.append(reviewed)
     return names
+
+
+def _removal_names(d: dict, label_ids: dict[str, str]) -> list[str]:
+    """Label names a `keep` decision should strip: the row's
+    `removed_labels`, minus any Gmail doesn't have (nothing to remove, and
+    apply-log never creates a label just to take it off)."""
+    return [n for n in (d.get("removed_labels") or []) if label_ids.get(n)]
 
 
 def _audit_labels(rec: dict, labels: list[str]) -> dict:
@@ -109,6 +120,10 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
                     decision_labels(d) if result != "trash" else [])
                 if d.get("reviewed_label"):
                     audit_rec["reviewed_label"] = d["reviewed_label"]
+                removed = (_removal_names(d, label_ids)
+                           if result != "trash" else [])
+                if removed:
+                    audit_rec["removed_labels"] = removed
                 audit_fh.write(json.dumps(audit_rec) + "\n")
                 return
             err = str(exception)
@@ -126,10 +141,13 @@ def _execute_with_retry(service, items, label_ids, audit_fh, counters,
             if d["action"] == "trash":
                 req = service.users().threads().trash(userId="me", id=tid)
             else:
+                body = {"addLabelIds": [label_ids[n]
+                                        for n in _keep_label_names(d)]}
+                removed = _removal_names(d, label_ids)
+                if removed:
+                    body["removeLabelIds"] = [label_ids[n] for n in removed]
                 req = service.users().threads().modify(
-                    userId="me", id=tid,
-                    body={"addLabelIds": [label_ids[n]
-                                          for n in _keep_label_names(d)]})
+                    userId="me", id=tid, body=body)
             batch.add(req, request_id=tid)
         try:
             batch.execute()
@@ -225,6 +243,17 @@ def run_apply_log(
             logger.info("[dry-run] would create %d new label(s): %s",
                         len(missing), missing)
 
+    # Removals are replayed only for labels that exist: one Gmail no longer
+    # has is already off every thread, so there is nothing to strip.
+    gone: set[str] = set()
+    for d in pending:
+        if d["action"] == "keep":
+            gone.update(n for n in (d.get("removed_labels") or [])
+                        if n not in label_ids)
+    if gone:
+        logger.warning("skipping removal of %d label(s) not in Gmail: %s",
+                       len(gone), sorted(gone))
+
     audit_fh = audit_log.open("a")
     audit_fh.write(
         f"\n=== {_dt.datetime.now(_dt.timezone.utc).isoformat()} "
@@ -244,9 +273,11 @@ def run_apply_log(
             for d in chunk:
                 tid = d["id"]
                 action = d["action"]
-                # All labels a keep should apply: category label(s) + reviewed_label.
+                # All labels a keep should apply: category label(s) + reviewed_label,
+                # and the ones it should strip (removed_labels).
                 names = _keep_label_names(d) if action == "keep" else []
-                if action == "keep" and not names:
+                removed = _removal_names(d, label_ids) if action == "keep" else []
+                if action == "keep" and not names and not removed:
                     counters["keep_nolabel"] += 1
                     audit_fh.write(json.dumps(_audit_labels(
                         {"id": tid, "result": "keep_nolabel"}, [])) + "\n")
@@ -264,6 +295,8 @@ def run_apply_log(
                                             decision_labels(d))
                         if d.get("reviewed_label"):
                             rec["reviewed_label"] = d["reviewed_label"]
+                        if removed:
+                            rec["removed_labels"] = removed
                         audit_fh.write(json.dumps(rec) + "\n")
                     continue
                 unresolved = [n for n in names if not label_ids.get(n)]
