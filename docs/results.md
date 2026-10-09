@@ -1,8 +1,11 @@
 # Run results
 
 Results from running this tool against my own Gmail inbox over
-8–9 calendar days in May 2026. Machine-readable version of the
-same numbers lives in [run-stats.json](run-stats.json).
+8–9 calendar days in May 2026, with the 1.0 release (one label per
+kept email; the one-or-two-label contract arrived in 1.4). The run
+is a historical record, so its numbers are not updated for later
+releases. Machine-readable version of the same numbers lives in
+[run-stats.json](run-stats.json).
 
 ## Headline
 
@@ -123,8 +126,9 @@ trash candidates the first pass missed:
 
 Two things were done in response:
 
-1. **Tool changes** (committed in [feat(classify): pass email age and
-   List-Unsubscribe presence to model](../README.md#what-gets-sent-to-the-llm)) —
+1. **Tool changes** (commit `feat(classify): pass email age and
+   List-Unsubscribe presence to model`; see
+   [What gets sent to the LLM](../README.md#what-gets-sent-to-the-llm)) —
    the per-email prompt block now includes `Age: N days` (derived from
    Gmail's `internalDate`) and `List-Unsubscribe: yes` (RFC 2369
    header presence). Together these cover the missing signal that
@@ -140,19 +144,35 @@ previously-kept threads. Because it's roughly 1/6th the scope of the
 original run (53k vs 312k), it's correspondingly faster — typically
 **under 12 hours on the same hardware**, vs the original ~65 hours.
 
-The procedure:
+The procedure (current CLI; the first pass above predates per-mode
+state files):
 
 1. Update `config/rules.md` to incorporate the new metadata-aware
    rules (see `config/rules.example.md` for the patterns).
-2. Move `state.json` aside so the classifier doesn't resume-skip
-   everything: `mv state.json state.json.first-pass`.
-3. Restrict the Gmail query to threads carrying the labels the first
-   pass applied — for example `older_than:90d label:Receipts OR
-   label:Registrations OR label:Notes -in:trash -in:spam`.
-4. Run `classify --dry-run` (it'll be much shorter — ~12 hrs at the
-   measured throughput).
-5. Audit the new dry-run.log diff against the first pass, then
-   `python -m gmail_cleanup apply-log --apply` the deltas.
+2. Restrict the Gmail query to threads carrying the labels the first
+   pass applied, **with the `OR` terms in parentheses**:
+   `older_than:90d (label:Receipts OR label:Registrations OR label:Notes) -in:trash -in:spam`.
+   Without them Gmail can silently drop part of the `OR` instead of
+   reporting an error.
+3. Give the follow-on its own log and state file, so neither the
+   first pass's resume state nor its decisions get in the way:
+
+   ```bash
+   python -m gmail_cleanup classify --dry-run \
+     --query '<the query above>' \
+     --log-file followon.log --state-file state-followon-dry-run.json
+   ```
+
+   (It'll be much shorter — ~12 hrs at the measured throughput.)
+4. Audit `followon.log` against the first pass.
+5. Replay it with a fresh `apply-log` state file. The first pass's
+   `state-applied.json` lists every one of these threads as already
+   applied, so reusing it would skip all the flips:
+
+   ```bash
+   python -m gmail_cleanup apply-log --apply \
+     --log-file followon.log --state-file state-applied-followon.json
+   ```
 
 Most "kept" threads are correctly kept; the follow-on flips only the
 ~1,800-ish items per the categories above. The iterative-refinement

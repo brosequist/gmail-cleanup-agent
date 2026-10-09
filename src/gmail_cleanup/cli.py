@@ -188,7 +188,7 @@ def auth():
          "text/html stripped) in the prompt, capped at 4 KB per email. Off by "
          "default — snippet + headers are enough for bulk triage. Use for "
          "higher-stakes runs where the snippet is ambiguous. Roughly 2-3x the "
-         "Gmail API payload size and ~+30% prompt tokens per email.",
+         "Gmail API payload size; a full 4 KB body adds ~700 prompt tokens per email.",
 )
 @click.option(
     "--console-log",

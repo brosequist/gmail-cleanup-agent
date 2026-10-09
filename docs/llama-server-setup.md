@@ -42,8 +42,11 @@ If the model spends its entire `OPENAI_MAX_TOKENS` budget on
 flags every email in the batch as "missing".
 
 **Symptom:** `WARNING gmail_cleanup: attempt 1: 20 emails missing
-decisions, retrying just those` on every batch, immediately followed
-by the retry-by-individual-email fallback (which also fails).
+decisions, retrying just those` on every batch. The classifier
+re-prompts the missing emails up to `--llm-retries` times (default 2),
+those calls come back empty too, and every email in the batch ends up
+kept with no label. Nothing is trashed, but nothing is classified
+either.
 
 **Fix:** opt in to the new env var:
 
@@ -130,8 +133,9 @@ inference-side speedup.)
 llama.cpp's `--cache-reuse N` lets the server reuse KV-cache slices
 from a previous request when the current request shares a token
 prefix with the cached one. The classifier prompt has a large fixed
-prefix (rules.md + label catalog = ~6,000 tokens) that repeats
-identically across every batch.
+prefix (rules.md + label catalog + output instructions, ~3,500 tokens
+with the example config; see [cost-math.md](cost-math.md#per-batch-token-sizing))
+that repeats identically across every batch.
 
 **This is a big win** — but only on batch 2+, and only on the same
 slot. Each new batch starts fresh on slot 0; if you've used
